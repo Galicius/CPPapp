@@ -1,0 +1,11 @@
+**/__pycache__/
+**/*.pyc
+*.db
+*.sqlite
+.env
+.venv
+venv
+.git
+.gitignore
+# if you keep a local slots.db inside backend
+backend/slots.db
