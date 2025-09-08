@@ -30,77 +30,6 @@ OUTDIR = "debug_pages"
 os.makedirs(OUTDIR, exist_ok=True)
 
 
-# -------------------- Known towns / canonicalization --------------------
-
-# Canonical names for towns, including variants that appear on the site
-# (e.g., "POSTOJNA EPIC" -> "POSTOJNA", "PTUJ CCE KAT" -> "PTUJ").
-KNOWN_TOWNS_BY_ZONE = {
-    1: [
-        "AJDOVŠČINA", "IDRIJA", "ILIRSKA BISTRICA", "KOPER",
-        "NOVA GORICA", "POSTOJNA", "SEŽANA", "TOLMIN",
-    ],
-    2: [
-        "DOMŽALE", "IG", "JESENICE", "KRANJ", "LJUBLJANA", "VRHNIKA",
-    ],
-    3: [
-        "CELJE", "LAŠKO", "LOČICA OB SAVINJI", "RAVNE NA KOROŠKEM",
-        "SLOVENSKE KONJICE", "SLOVENJ GRADEC", "ŠENTJUR",
-        "ŠMARJE PRI JELŠAH", "TRBOVLJE", "VELENJE",
-    ],
-    4: [
-        "BREŽICE", "ČRNOMELJ", "KOČEVJE", "KRŠKO",
-        "NOVO MESTO", "SEVNICA",
-    ],
-    5: [
-        "MARIBOR", "MURSKA SOBOTA", "ORMOŽ", "PTUJ", "SLOVENSKA BISTRICA",
-    ],
-}
-
-# Patterns that should be reduced to a canonical town
-_CANONICAL_VARIANTS = {
-    # zone 1
-    "POSTOJNA EPIC": "POSTOJNA",
-    "TOLMIN IIN": "TOLMIN",
-    "TOLMIN UE": "TOLMIN",
-    # zone 4
-    "BREŽICE TEORIJA": "BREŽICE",
-    "KOČEVJE ŠD GAJ": "KOČEVJE",
-    "KOČEVJE VADBENA POVRŠINA HERBBY": "KOČEVJE",
-    "NOVO MESTO BTC ČEŠČA VAS BE CE": "NOVO MESTO",
-    "NOVO MESTO UE": "NOVO MESTO",
-    # zone 5
-    "PTUJ CCE KAT": "PTUJ",
-    "PTUJ KAT": "PTUJ",
-}
-
-
-def _canonicalize_town(raw: str, obmocje: int | None) -> str | None:
-    """Return a canonical town name if we can confidently match it.
-    Strategy:
-      1) Apply explicit variants mapping.
-      2) If obmocje is known, look for any known town for that zone in the text.
-      3) Fallback to uppercase-only heuristic (first words before address).
-    """
-    if not raw:
-        return None
-
-    # 1) Direct variants
-    up = raw.upper()
-    for variant, canon in _CANONICAL_VARIANTS.items():
-        if variant in up:
-            return canon
-
-    # 2) Match against known towns for the detected zone
-    if obmocje in KNOWN_TOWNS_BY_ZONE:
-        for town in KNOWN_TOWNS_BY_ZONE[obmocje]:
-            # word-boundary-ish check; allow commas/spaces before/after
-            if re.search(rf"(?<!\\w){re.escape(town)}(?!\\w)", up):
-                return town
-
-    # 3) Fallback: heuristic uppercase extraction
-    return _clean_town(up)
-
-
 # -------------------- Utils --------------------
 
 def _norm_space(s: str) -> str:
@@ -151,20 +80,6 @@ def _parse_exam_type(node) -> Optional[str]:
     """
     'Preverjanje znanja vožnje'  -> 'voznja'
     'Preverjanje znanja teorije' -> 'teorija'
-    Also recognizes short occurrences of 'vožnja' / 'teorija' elsewhere in content.
-    """
-    co = node.select_one("div.contentOpomnik")
-    if not co:
-        return None
-    t = _text(co).lower()
-    if "preverjanje znanja vožnje" in t or re.search(r"\\bvožnja\\b|\\bvoznja\\b", t):
-        return "voznja"
-    if "preverjanje znanja teorije" in t or re.search(r"\\bteorija\\b", t):
-        return "teorija"
-    return None
-    """
-    'Preverjanje znanja vožnje'  -> 'voznja'
-    'Preverjanje znanja teorije' -> 'teorija'
     """
     co = node.select_one("div.contentOpomnik")
     if not co:
@@ -179,34 +94,46 @@ def _parse_exam_type(node) -> Optional[str]:
 
 def _clean_town(raw: str) -> Optional[str]:
     """
-    Keep only the town/city name in CAPS (can be multiple words), stop before
-    address/keywords/digits/lowercase.
-
-    Examples:
-      'BREŽICE Izobraževalno vadbeni center Bizeljska cesta' -> 'BREŽICE'
-      'MARIBOR, Cesta k Tamu 11'                             -> 'MARIBOR'
-      'NOVA GORICA Kidričeva 9'                              -> 'NOVA GORICA'
+    Normalize town name:
+      - Extract only the first matching town keyword from the območje mapping
+      - Transform to 'Title Case' (Novo mesto, Slovenska Bistrica, ...)
     """
     raw = raw.replace(",", " ")
     tokens = [t for t in raw.split() if t]
 
+    # Mapa območij -> mesta (glede na tvojo drugo sliko)
+    obmocje_map = {
+        1: ["Ajdovščina", "Idrija", "Ilirska Bistrica", "Koper", "Nova Gorica",
+            "Postojna", "Sežana", "Tolmin"],
+        2: ["Domžale", "Ig", "Jesenice", "Kranj", "Ljubljana", "Vrhnika"],
+        3: ["Celje", "Laško", "Ločica ob Savinji", "Ravne na Koroškem",
+            "Slovenske Konjice", "Slovenj Gradec", "Šentjur",
+            "Šmarje pri Jelšah", "Trbovlje", "Velenje"],
+        4: ["Brežice", "Črnomelj", "Kočevje", "Krško", "Novo mesto", "Sevnica"],
+        5: ["Maribor", "Murska Sobota", "Ormož", "Ptuj", "Slovenska Bistrica"],
+    }
+
+    raw_lower = raw.lower()
+
+    # Poišči prvo mesto, ki se nahaja v raw
+    for obm, mesta in obmocje_map.items():
+        for town in mesta:
+            if town.lower() in raw_lower:
+                return town  # vrne že pravilno zapisano (title case iz slovarja)
+
+    # fallback: če nič ne ujame, uporabi prvi uppercase token
     parts: List[str] = []
     for tok in tokens:
-        # Stop when digits appear (address numbers)
         if re.match(r"^\d", tok):
             break
-        # Stop if token starts with lowercase (likely address word)
         if tok[0].islower():
             break
-        # Stop on common street/location words (case-insensitive)
-        if tok.lower() in {"ulica", "cesta", "naselje", "center", "trg", "testirnica", "vožnja", "voznja"}:
+        if tok.lower() in {"ulica", "cesta", "naselje", "center", "trg",
+                           "testirnica", "vožnja", "voznja"}:
             break
-        # Accept token if it's uppercase-ish (allow Slovenian diacritics & hyphens)
-        # Heuristic: consider letters that are not lowercase (digits and punctuation already filtered)
         if tok.upper() == tok:
-            parts.append(tok)
+            parts.append(tok.capitalize())
         else:
-            # Mixed-case => likely not part of town name
             break
 
     town = " ".join(parts).strip(" .,")
@@ -214,43 +141,30 @@ def _clean_town(raw: str) -> Optional[str]:
     return town or None
 
 
+
 def _parse_obmocje_and_town(node) -> Tuple[Optional[int], Optional[str], bool]:
     """
     From 'upperOpomnikDiv' line extract:
       - obmocje (int from 'Območje X')
-      - town    (canonical city name; not necessarily all-caps in source)
+      - town    (caps city name only)
       - tolmac  (True if 'tolmač' appears)
-
-    Also supports patterns like: 'Za izpit s tolmačem MARIBOR, ...' where we can
-    directly capture the town.
     """
-    content = node.select_one("div.contentOpomnik")
-    co_text = _norm_space(_text(content)) if content else ""
-
-    # First, try 'Za izpit s tolmačem TOWN' pattern anywhere in the card
-    m_tol = re.search(r"Za\\s+izpit\\s+s\\s+tolma[cč]em\\s+([A-Za-zČŠŽĆĐčšžćđ\-\\s]+)", co_text, re.IGNORECASE)
-    tolmac = bool(m_tol)
-
-    tolmac_town = None
-    if m_tol:
-        # stop before a comma or known address keywords
-        cand = m_tol.group(1).strip()
-        cand = re.split(r",|\\s+ulica|\\s+cesta|\\s+naselje|\\s+center|\\s+trg|\\s+testirnica", cand, flags=re.IGNORECASE)[0]
-        tolmac_town = cand.strip()
-
-    # Now parse the standard 'Območje X, ...' line
     upper = node.select_one("div.contentOpomnik div.upperOpomnikDiv")
-    raw_upper = _norm_space(_text(upper)) if upper else ""
+    if not upper:
+        return None, None, False
+
+    raw = _norm_space(_text(upper))
 
     # Območje
-    m_zone = re.search(r"Območje\\s+(\\d+)", raw_upper, re.IGNORECASE)
+    m_zone = re.search(r"Območje\s+(\d+)", raw, re.IGNORECASE)
     obmocje = int(m_zone.group(1)) if m_zone else None
 
-    # Candidate town region from the standard line: text after first comma
-    after = raw_upper.split(",", 1)[1].strip() if "," in raw_upper else raw_upper
+    # Tolmač — allow c/č variants
+    tolmac = bool(re.search(r"tolma[cč]", raw, re.IGNORECASE))
 
-    # Prefer tolmač-captured town if present; otherwise canonicalize from upper line
-    town = _canonicalize_town(tolmac_town or after, obmocje)
+    # Town: take substring after the first comma, then clean to CAPS-only name
+    after = raw.split(",", 1)[1].strip() if "," in raw else raw
+    town = _clean_town(after)
 
     return obmocje, town, tolmac
 
@@ -400,16 +314,21 @@ def fetch_all_pages(
         seen = set()
         last_len = None
 
-        for page in range(1, max_pages + 1):
-            params = {**base, "page": page}
+        for page in range(0, max_pages):
+            # Build params: first request => NO "page" param
+            params = {**base}
+            if page > 0:
+                params["page"] = page  # page=1 is the SECOND batch
+
             url = f"{AJAX}?{urlencode(params)}"
             resp = _get(s, url, headers)
             html = resp.text
 
             if DEBUG:
-                print(f"[page {page}] status={resp.status_code} len={len(html)} url={url}")
-                if page <= 2:
-                    with open(os.path.join(OUTDIR, f"page_{page}.html"), "w", encoding="utf-8") as f:
+                human_page = "first" if page == 0 else f"page {page}"
+                print(f"[{human_page}] status={resp.status_code} len={len(html)} url={url}")
+                if page <= 1:
+                    with open(os.path.join(OUTDIR, f"page_{page or 1}.html"), "w", encoding="utf-8") as f:
                         f.write(html)
 
             if not html or (last_len is not None and len(html) == last_len and len(html) < 100):
@@ -418,7 +337,7 @@ def fetch_all_pages(
 
             blocks = _extract_blocks(html)
             if DEBUG:
-                print(f"[page {page}] blocks detected: {len(blocks)}")
+                print(f"[{human_page}] blocks detected: {len(blocks)}")
             if not blocks:
                 break
 
