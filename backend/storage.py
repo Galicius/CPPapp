@@ -50,6 +50,7 @@ def _make_key(it: dict) -> tuple:
 def upsert_slots(items: list[dict]) -> tuple[int, int]:
     """
     Insert new or update existing slots by unique key.
+    Also upserts a global 'last_scraped_at' timestamp if ScrapeMeta exists.
     Returns (opened, updated).
     """
     now = datetime.utcnow()
@@ -66,8 +67,6 @@ def upsert_slots(items: list[dict]) -> tuple[int, int]:
                     it["location"] = loc
                 else:
                     it["location"] = None
-
-            key = _make_key(it)
 
             # try to find existing record
             q = select(Slot).where(
@@ -109,6 +108,28 @@ def upsert_slots(items: list[dict]) -> tuple[int, int]:
                 row.updated_at = now
                 updated += 1
 
+        # Persist global last-scrape timestamp if ScrapeMeta model is present.
+        # Safe no-op if ScrapeMeta isn't defined yet.
+        try:
+            meta = ses.get(ScrapeMeta, 1)  # type: ignore[name-defined]
+            if meta is None:
+                ses.add(ScrapeMeta(id=1, last_scraped_at=now))  # type: ignore[name-defined]
+            else:
+                meta.last_scraped_at = now
+        except NameError:
+            pass
+
         ses.commit()
 
     return opened, updated
+
+
+
+class ScrapeMeta(SQLModel, table=True):
+    id: int = Field(default=1, primary_key=True)
+    last_scraped_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+def get_last_scraped_at() -> Optional[datetime]:
+    with Session(engine) as ses:
+        meta = ses.get(ScrapeMeta, 1)
+        return meta.last_scraped_at if meta else None

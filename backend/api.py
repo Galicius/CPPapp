@@ -98,3 +98,82 @@ def list_slots(
         out = out[: min(limit, 1000)]  # safety cap if you want one
     return out
 
+@app.get("/slots_all")
+def slots_all(
+    cat: str | None = Query(default=None, description="Comma categories, e.g. B,B1"),
+    region: str | None = Query(default=None, description="Contains 'Območje X'"),
+    limit: int | None = Query(default=None, description="Optional max items"),
+    include_fields: str | None = Query(default=None, description="Comma list of extra fields: obmocje,town,exam_type,places_left,tolmac,source_page,created_at,updated_at"),
+):
+    """
+    Return ALL stored slots (past + future), plus last scrape timestamp.
+    """
+    tz = ZoneInfo("Europe/Ljubljana")
+
+    # read everything (do NOT filter by available)
+    with Session(engine) as ses:
+        rows = ses.exec(select(Slot)).all()
+
+    # helpers to sort by real date+time
+    def _d(s: str):
+        # '10. 9. 2025' -> date
+        return datetime.strptime(s.strip(), "%d. %m. %Y").date()
+    def _t(s: str | None):
+        s = (s or "00:00").strip()
+        return datetime.strptime(s, "%H:%M").time()
+
+    # shape base fields like your /slots response for compatibility
+    items = []
+    for s in rows:
+        try:
+            d = _d(s.date_str)
+        except Exception:
+            continue
+        it = {
+            "date_str": s.date_str,
+            "time_str": s.time_str,
+            "location": s.location,
+            "categories": s.categories,
+        }
+
+        # optionally enrich
+        if include_fields:
+            extra = {f.strip() for f in include_fields.split(",") if f.strip()}
+            if "obmocje" in extra:     it["obmocje"] = s.obmocje
+            if "town" in extra:        it["town"] = s.town
+            if "exam_type" in extra:   it["exam_type"] = s.exam_type
+            if "places_left" in extra: it["places_left"] = s.places_left
+            if "tolmac" in extra:      it["tolmac"] = s.tolmac
+            if "source_page" in extra: it["source_page"] = s.source_page
+            if "created_at" in extra:  it["created_at"] = s.created_at.isoformat(timespec="seconds") + "Z"
+            if "updated_at" in extra:  it["updated_at"] = s.updated_at.isoformat(timespec="seconds") + "Z"
+
+        items.append((d, _t(s.time_str), it))
+
+    # filters
+    if cat:
+        want = {x.strip() for x in cat.split(",") if x.strip()}
+        items = [t for t in items if want & set(t[2]["categories"].split(","))]
+    if region:
+        items = [t for t in items if t[2]["location"] and f"Območje {region}" in t[2]["location"]]
+
+    # sort by date then time
+    items.sort(key=lambda x: (x[0], x[1]))
+
+    out = [t[2] for t in items]
+    if isinstance(limit, int) and limit > 0:
+        out = out[: min(limit, 10000)]  # soft safety cap
+
+    # last scrape timestamp (local time for readability)
+    last = get_last_scraped_at()
+    last_local = None
+    if last:
+        # last is stored in UTC (naive); present in Europe/Ljubljana for users
+        last_local = last.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz).isoformat(timespec="seconds")
+
+    return {
+        "last_scraped_at": last_local,  # e.g. "2025-09-09T00:44:13+02:00"
+        "count": len(out),
+        "items": out,
+    }
+
