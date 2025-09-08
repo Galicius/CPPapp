@@ -7,6 +7,8 @@ from storage import init_db, engine, Slot, upsert_slots
 from scraper import fetch_all_pages
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from sqlmodel import Session, select
+from storage import init_db, engine, Slot, upsert_slots, get_last_scraped_at
 
 
 
