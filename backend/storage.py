@@ -8,6 +8,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///slots.db")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 class Slot(SQLModel, table=True):
+    __tablename__ = "slot"
+    __table_args__ = {"extend_existing": True}
+
     id: Optional[int] = Field(default=None, primary_key=True)
 
     date_str: str
@@ -30,7 +33,7 @@ class Slot(SQLModel, table=True):
     available: bool = Field(default=True, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    last_seen_at: Optional[datetime] = Field(default=None, index=True)  # <-- add this
+    last_seen_at: Optional[datetime] = Field(default=None, index=True)
 
 class ScrapeMeta(SQLModel, table=True):
     id: int = Field(default=1, primary_key=True)
@@ -156,8 +159,22 @@ def finalize_scrape(scrape_ts: datetime):
 
 
 class ScrapeMeta(SQLModel, table=True):
+    # keep the existing physical table name that already exists in your DB
+    __tablename__ = "scrapemeta"
+    __table_args__ = {"extend_existing": True}
+
     id: int = Field(default=1, primary_key=True)
     last_scraped_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+def init_db():
+    # Create tables once; extend_existing avoids duplicate-definition errors
+    SQLModel.metadata.create_all(engine)
+    # Ensure a singleton meta row exists
+    with Session(engine) as ses:
+        meta = ses.get(ScrapeMeta, 1)
+        if not meta:
+            ses.add(ScrapeMeta(id=1, last_scraped_at=datetime.utcnow()))
+            ses.commit()
 
 def get_last_scraped_at() -> Optional[datetime]:
     with Session(engine) as ses:
