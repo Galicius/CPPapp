@@ -5,10 +5,14 @@ from sqlalchemy import text
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///slots.db")
+# Prefer external DB via env; for Cloud Run + SQLite use /tmp
+if DATABASE_URL.startswith("sqlite:///") and not DATABASE_URL.startswith("sqlite:////"):
+    # force absolute, writable path only when staying on SQLite in containers
+    DATABASE_URL = "sqlite:////tmp/slots.db"
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 class Slot(SQLModel, table=True):
-    __tablename__ = "slot"
+    __tablename__ = "slot"  # type: ignore[assignment]
     __table_args__ = {"extend_existing": True}
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -141,9 +145,10 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
 
 
 def finalize_scrape(scrape_ts: datetime):
-    now = datetime()
+    now = datetime.utcnow()
     with Session(engine) as ses:
-        ses.exec(text("""
+        # Execute raw SQL for bulk update
+        ses.execute(text("""
             update slot
             set places_left = 0,
                 available = false,
@@ -155,24 +160,23 @@ def finalize_scrape(scrape_ts: datetime):
 
 
 class ScrapeMeta(SQLModel, table=True):
-    __tablename__ = "scrapemeta"
+    __tablename__ = "scrapemeta"  # type: ignore[assignment]
     __table_args__ = {"extend_existing": True}
 
     id: int = Field(default=1, primary_key=True)
     last_scraped_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
-
-def init_db():
-    # Create tables once; extend_existing avoids duplicate-definition errors
-    SQLModel.metadata.create_all(engine)
-    # Ensure a singleton meta row exists
-    with Session(engine) as ses:
-        meta = ses.get(ScrapeMeta, 1)
-        if not meta:
-            ses.add(ScrapeMeta(id=1, last_scraped_at=datetime.utcnow()))
-            ses.commit()
-
 def get_last_scraped_at() -> Optional[datetime]:
     with Session(engine) as ses:
         meta = ses.get(ScrapeMeta, 1)
         return meta.last_scraped_at if meta else None
+
+def set_last_scraped_at(ts: datetime):
+    with Session(engine) as ses:
+        meta = ses.get(ScrapeMeta, 1)
+        if not meta:
+            meta = ScrapeMeta(id=1, last_scraped_at=ts)
+            ses.add(meta)
+        else:
+            meta.last_scraped_at = ts
+        ses.commit()

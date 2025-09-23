@@ -8,7 +8,7 @@ from scraper import fetch_all_pages
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from sqlmodel import Session, select
-from storage import init_db, engine, Slot, upsert_slots, get_last_scraped_at
+from storage import init_db, engine, Slot, upsert_slots, get_last_scraped_at, finalize_scrape, set_last_scraped_at
 
 DEFAULT_SLOTS_EXTRAS = "places_left,exam_type,tolmac,obmocje,town"
 
@@ -51,6 +51,8 @@ def trigger(x_secret: str | None = Header(default=None)):
         raise HTTPException(status_code=403, detail="forbidden")
     slots = fetch_all_pages()
     opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
+    finalize_scrape(scrape_ts)
+    set_last_scraped_at(scrape_ts)
     return {"opened": opened, "total": len(slots)}
 
 @app.on_event("startup")
@@ -85,7 +87,10 @@ def slots(
 
     items = [_serialize_slot(s, extra) for s in rows]
     last = get_last_scraped_at()
-    last_iso = last.astimezone().isoformat(timespec="seconds") if last else None
+    last_iso = None
+    if last:
+        # last is stored as naive UTC; present in local tz
+        last_iso = last.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Ljubljana")).isoformat(timespec="seconds")
 
     return {
         "last_scraped_at": last_iso,

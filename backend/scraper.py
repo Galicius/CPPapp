@@ -6,6 +6,7 @@ import time
 import random
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List, Dict
+from zoneinfo import ZoneInfo
 
 import httpx
 from bs4 import BeautifulSoup
@@ -24,10 +25,13 @@ AJAX = f"{BASE}/si/javne-evidence/prosti-termini/content/singleton.html"
 MAX_PAGES = 300               # hard safety cap
 MAX_DAYS_AHEAD = 30           # stop when a slot's date is beyond this many days
 REQUEST_PAUSE = (0.6, 1.1)    # random sleep range between pages (seconds)
-DEBUG = True
+# --- top-level config ---
+DEBUG = os.getenv("DEBUG", "0") == "1"
 
-OUTDIR = "debug_pages"
-os.makedirs(OUTDIR, exist_ok=True)
+OUTDIR = os.getenv("OUTDIR", "/tmp/debug_pages")
+if DEBUG:
+    os.makedirs(OUTDIR, exist_ok=True)
+
 
 
 # -------------------- Utils --------------------
@@ -284,7 +288,7 @@ def fetch_all_pages(
         "Accept-Language": "sl-SI,sl;q=0.9,en-US;q=0.8,en;q=0.7",
     }
 
-    cutoff_date = datetime.now() + timedelta(days=MAX_DAYS_AHEAD)
+    cutoff_date = datetime.now(ZoneInfo("Europe/Ljubljana")) + timedelta(days=MAX_DAYS_AHEAD)
 
     with httpx.Client(follow_redirects=True, headers=default_headers) as s:
         # Warmup for cookies
@@ -324,8 +328,8 @@ def fetch_all_pages(
             resp = _get(s, url, headers)
             html = resp.text
 
+            human_page = "first" if page == 0 else f"page {page}"
             if DEBUG:
-                human_page = "first" if page == 0 else f"page {page}"
                 print(f"[{human_page}] status={resp.status_code} len={len(html)} url={url}")
                 if page <= 1:
                     with open(os.path.join(OUTDIR, f"page_{page or 1}.html"), "w", encoding="utf-8") as f:
@@ -409,7 +413,7 @@ def fetch_all_pages(
 if __name__ == "__main__":
     init_db()
     slots = fetch_all_pages()
-    opened, updated = upsert_slots(slots)
+    opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
 
     print(f"Found {len(slots)} slots | opened(new): {opened} | touched: {updated}")
     for i, s in enumerate(slots[:5], 1):
