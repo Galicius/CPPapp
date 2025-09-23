@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from sqlmodel import Session, select
 from storage import init_db, engine, Slot, upsert_slots, get_last_scraped_at
 
+DEFAULT_SLOTS_EXTRAS = "places_left,exam_type,tolmac,obmocje,town"
 
 
 app = FastAPI(title="SlotWatch API")
@@ -26,6 +27,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def _serialize_slot(s: Slot, extra: Set[str]):
+    it = {
+        "date_str": s.date_str,
+        "time_str": s.time_str,
+        "location": s.location,
+        "categories": s.categories,
+    }
+    if "obmocje" in extra:     it["obmocje"] = s.obmocje
+    if "town" in extra:        it["town"] = s.town
+    if "exam_type" in extra:   it["exam_type"] = s.exam_type
+    if "places_left" in extra: it["places_left"] = s.places_left or 0
+    if "tolmac" in extra:      it["tolmac"] = bool(s.tolmac)
+    if "created_at" in extra:  it["created_at"] = s.created_at.isoformat(timespec="seconds") + "Z"
+    if "updated_at" in extra:  it["updated_at"] = s.updated_at.isoformat(timespec="seconds") + "Z"
+    return it
 
 SCRAPE_SECRET = os.getenv("SCRAPE_SECRET")
 
@@ -46,59 +62,36 @@ def health():
     return {"ok": True}
 
 @app.get("/slots")
-def list_slots(
-    cat: str | None = Query(default=None, description="Comma categories, e.g. B,B1"),
-    region: str | None = Query(default=None, description="Contains 'Območje X'"),
-    days: int = Query(default=30, ge=1, le=90, description="How many days ahead to include"),
-    limit: int | None = Query(default=None, description="Optional max items (no cap if omitted)"),
+def slots(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    include_fields: str = Query(DEFAULT_SLOTS_EXTRAS),
 ):
-    tz = ZoneInfo("Europe/Ljubljana")
-    today = datetime.now(tz).date()
-    end = today + timedelta(days=days)
+    """
+    Current (available) slots only. Supports extra fields like /slots_all via include_fields.
+    """
+    extra = {p.strip() for p in include_fields.split(",") if p.strip()}
 
     with Session(engine) as ses:
-        q = select(Slot).where(Slot.available == True)
+        q = (
+            select(Slot)
+            .where(Slot.available == True)
+            # order by soonest; date_str is a string, but works consistently enough for same-locale format
+            .order_by(Slot.date_str, Slot.time_str)
+            .offset(offset)
+            .limit(limit)
+        )
         rows = ses.exec(q).all()
 
-    def _parse_date(s: str):
-        return datetime.strptime(s.strip(), "%d. %m. %Y").date()
+    items = [_serialize_slot(s, extra) for s in rows]
+    last = get_last_scraped_at()
+    last_iso = last.astimezone().isoformat(timespec="seconds") if last else None
 
-    def _parse_time(s: str | None):
-        s = (s or "00:00").strip()
-        return datetime.strptime(s, "%H:%M").time()
-
-    items = []
-    for s in rows:
-        try:
-            d = _parse_date(s.date_str)
-        except Exception:
-            continue
-        if not (today <= d <= end):
-            continue
-
-        it = {
-            "date_str": s.date_str,
-            "time_str": s.time_str,
-            "location": s.location,
-            "categories": s.categories,
-        }
-        items.append((d, _parse_time(s.time_str), it))
-
-    # Filters
-    if cat:
-        selected = {x.strip() for x in cat.split(",") if x.strip()}
-        items = [t for t in items if selected & set(t[2]["categories"].split(","))]
-    if region:
-        items = [t for t in items if t[2]["location"] and f"Območje {region}" in t[2]["location"]]
-
-    # Sort by real date then time
-    items.sort(key=lambda x: (x[0], x[1]))
-
-    # Finalize + optional limit (no hard 50 cap anymore)
-    out = [t[2] for t in items]
-    if isinstance(limit, int) and limit > 0:
-        out = out[: min(limit, 1000)]  # safety cap if you want one
-    return out
+    return {
+        "last_scraped_at": last_iso,
+        "count": len(items),
+        "items": items,
+    }
 
 @app.get("/slots_all")
 def slots_all(
