@@ -27,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def _serialize_slot(s: Slot, extra: Set[str]):
+def _serialize_slot(s: Slot, extra: set[str]):
     it = {
         "date_str": s.date_str,
         "time_str": s.time_str,
@@ -50,7 +50,7 @@ def trigger(x_secret: str | None = Header(default=None)):
     if SCRAPE_SECRET and x_secret != SCRAPE_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
     slots = fetch_all_pages()
-    opened, updated = upsert_slots(slots)
+    opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
     return {"opened": opened, "total": len(slots)}
 
 @app.on_event("startup")
