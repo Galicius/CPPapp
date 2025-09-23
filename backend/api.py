@@ -101,7 +101,7 @@ def slots_all(
     include_fields: str | None = Query(default=None, description="Comma list of extra fields: obmocje,town,exam_type,places_left,tolmac,source_page,created_at,updated_at"),
 ):
     """
-    Return ALL stored slots (past + future), plus last scrape timestamp.
+    Return ALL stored slots (past + future), plus last scrape timestamp for dashboard.
     """
     tz = ZoneInfo("Europe/Ljubljana")
 
