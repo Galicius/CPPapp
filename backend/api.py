@@ -1,9 +1,10 @@
 # api.py
 import os
+import logging
 from fastapi import FastAPI, Query, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
-from storage import init_db, engine, Slot, upsert_slots
+from storage import init_db, engine, Slot, upsert_slots, finalize_scrape
 from scraper import fetch_all_pages
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -45,15 +46,21 @@ def _serialize_slot(s: Slot, extra: set[str]):
 
 SCRAPE_SECRET = os.getenv("SCRAPE_SECRET")
 
+log = logging.getLogger("uvicorn.error")
+
 @app.post("/admin/trigger-scrape")
 def trigger(x_secret: str | None = Header(default=None)):
     if SCRAPE_SECRET and x_secret != SCRAPE_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
-    slots = fetch_all_pages()
-    opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
-    finalize_scrape(scrape_ts)
-    set_last_scraped_at(scrape_ts)
-    return {"opened": opened, "total": len(slots)}
+    try:
+        slots = fetch_all_pages()
+        opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
+        # optional, once finalize_scrape is fixed:
+        # finalize_scrape(scrape_ts)
+        return {"opened": opened, "updated": updated, "total": len(slots)}
+    except Exception:
+        log.exception("trigger-scrape failed")
+        raise
 
 @app.on_event("startup")
 def _start():

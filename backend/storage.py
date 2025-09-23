@@ -3,13 +3,19 @@ from typing import Optional
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy import text
 import os
+from sqlmodel import create_engine
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///slots.db")
-# Prefer external DB via env; for Cloud Run + SQLite use /tmp
-if DATABASE_URL.startswith("sqlite:///") and not DATABASE_URL.startswith("sqlite:////"):
-    # force absolute, writable path only when staying on SQLite in containers
+
+# Force a writable, per-instance path when using SQLite in Cloud Run
+if DATABASE_URL.startswith("sqlite:///"):
     DATABASE_URL = "sqlite:////tmp/slots.db"
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    connect_args={"check_same_thread": False, "timeout": 30},
+)
 
 class Slot(SQLModel, table=True):
     __tablename__ = "slot"  # type: ignore[assignment]
@@ -40,6 +46,11 @@ class Slot(SQLModel, table=True):
     last_seen_at: Optional[datetime] = Field(default=None, index=True)
 
 def init_db():
+    # SQLite pragmas for concurrency
+    if DATABASE_URL.startswith("sqlite:"):
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+            conn.exec_driver_sql("PRAGMA busy_timeout=30000;")
     SQLModel.metadata.create_all(engine)
     # ensure a singleton row exists for scrape meta
     with Session(engine) as ses:
@@ -147,7 +158,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
 def finalize_scrape(scrape_ts: datetime):
     now = datetime.utcnow()
     with Session(engine) as ses:
-        # Execute raw SQL for bulk update
+        # Execute raw SQL for bulk update using SQLAlchemy's execute method
         ses.execute(text("""
             update slot
             set places_left = 0,

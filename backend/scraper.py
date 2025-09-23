@@ -329,11 +329,10 @@ def fetch_all_pages(
             html = resp.text
 
             human_page = "first" if page == 0 else f"page {page}"
-            if DEBUG:
-                print(f"[{human_page}] status={resp.status_code} len={len(html)} url={url}")
-                if page <= 1:
-                    with open(os.path.join(OUTDIR, f"page_{page or 1}.html"), "w", encoding="utf-8") as f:
-                        f.write(html)
+            # guard writes
+            if DEBUG and page <= 1:
+                with open(os.path.join(OUTDIR, f"page_{page or 1}.html"), "w", encoding="utf-8") as f:
+                    f.write(html)
 
             if not html or (last_len is not None and len(html) == last_len and len(html) < 100):
                 break
