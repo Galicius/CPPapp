@@ -7,15 +7,20 @@ from sqlmodel import create_engine
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///slots.db")
 
-# Force a writable, per-instance path when using SQLite in Cloud Run
-if DATABASE_URL.startswith("sqlite:///"):
+# Put SQLite db under /tmp when running in containers
+if DATABASE_URL.startswith("sqlite:///") and not DATABASE_URL.startswith("sqlite:////"):
     DATABASE_URL = "sqlite:////tmp/slots.db"
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    connect_args={"check_same_thread": False, "timeout": 30},
-)
+IS_SQLITE = DATABASE_URL.startswith("sqlite:")
+
+if IS_SQLITE:
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+else:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 class Slot(SQLModel, table=True):
     __tablename__ = "slot"  # type: ignore[assignment]
@@ -47,7 +52,7 @@ class Slot(SQLModel, table=True):
 
 def init_db():
     # SQLite pragmas for concurrency
-    if DATABASE_URL.startswith("sqlite:"):
+    if IS_SQLITE:
         with engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
             conn.exec_driver_sql("PRAGMA busy_timeout=30000;")
@@ -159,7 +164,7 @@ def finalize_scrape(scrape_ts: datetime):
     now = datetime.utcnow()
     with Session(engine) as ses:
         # Execute raw SQL for bulk update using SQLAlchemy's execute method
-        ses.execute(text("""
+        ses.exec(text("""
             update slot
             set places_left = 0,
                 available = false,

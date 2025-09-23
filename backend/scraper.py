@@ -15,6 +15,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from storage import init_db, upsert_slots
 
+LOCAL_TZ = ZoneInfo("Europe/Ljubljana")
+
 
 # -------------------- Config --------------------
 
@@ -268,6 +270,11 @@ def _extract_blocks(html: str):
 
 # -------------------- Main fetcher --------------------
 
+def _localize(dt: datetime) -> datetime:
+    """The scraped times are local; attach LOCAL_TZ if naive"""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=LOCAL_TZ)
+
+
 def fetch_all_pages(
     type_: str = "-",
     category: str = "-",
@@ -288,7 +295,7 @@ def fetch_all_pages(
         "Accept-Language": "sl-SI,sl;q=0.9,en-US;q=0.8,en;q=0.7",
     }
 
-    cutoff_date = datetime.now(ZoneInfo("Europe/Ljubljana")) + timedelta(days=MAX_DAYS_AHEAD)
+    cutoff_date = datetime.now(LOCAL_TZ) + timedelta(days=MAX_DAYS_AHEAD)
 
     with httpx.Client(follow_redirects=True, headers=default_headers) as s:
         # Warmup for cookies
@@ -359,6 +366,7 @@ def fetch_all_pages(
                 # cutoff
                 try:
                     dt = datetime.strptime(date.strip(), "%d. %m. %Y")
+                    dt = _localize(dt)
                     if dt > cutoff_date:
                         if DEBUG:
                             print(f"[cutoff] hit {date} (> {cutoff_date.date()}), stopping.")
