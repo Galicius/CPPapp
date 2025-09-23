@@ -35,10 +35,6 @@ class Slot(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     last_seen_at: Optional[datetime] = Field(default=None, index=True)
 
-class ScrapeMeta(SQLModel, table=True):
-    id: int = Field(default=1, primary_key=True)
-    last_scraped_at: datetime = Field(default_factory=datetime.utcnow, index=True)
-
 def init_db():
     SQLModel.metadata.create_all(engine)
     # ensure a singleton row exists for scrape meta
@@ -159,12 +155,12 @@ def finalize_scrape(scrape_ts: datetime):
 
 
 class ScrapeMeta(SQLModel, table=True):
-    # keep the existing physical table name that already exists in your DB
     __tablename__ = "scrapemeta"
     __table_args__ = {"extend_existing": True}
 
     id: int = Field(default=1, primary_key=True)
     last_scraped_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
 
 def init_db():
     # Create tables once; extend_existing avoids duplicate-definition errors
