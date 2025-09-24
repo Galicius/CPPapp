@@ -4,7 +4,8 @@ import logging
 from fastapi import FastAPI, Query, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
-from storage import init_db, engine, Slot, upsert_slots, finalize_scrape
+from sqlalchemy import text
+from storage import init_db, engine, Slot, upsert_slots, finalize_scrape, IS_SQLITE
 from scraper import fetch_all_pages
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -82,14 +83,15 @@ def slots(
     extra = {p.strip() for p in include_fields.split(",") if p.strip()}
 
     with Session(engine) as ses:
-        q = (
-            select(Slot)
-            .where(Slot.available == True)
-            # order by soonest; date_str is a string, but works consistently enough for same-locale format
-            .order_by(Slot.date_str, Slot.time_str)
-            .offset(offset)
-            .limit(limit)
-        )
+        order_cols = []
+        if hasattr(Slot, "date_iso") and hasattr(Slot, "time_iso"):
+            order_cols = [Slot.date_iso, Slot.time_iso, Slot.id]
+        elif IS_SQLITE:
+            order_cols = [Slot.date_str, Slot.time_str, Slot.id]
+        else:
+            order_cols = [text("to_date(date_str, 'DD. MM. YYYY')"),
+                          text("time_str::time"), Slot.id]
+        q = select(Slot).where(Slot.available == True).order_by(*order_cols).offset(offset).limit(limit)
         rows = ses.exec(q).all()
 
     items = [_serialize_slot(s, extra) for s in rows]

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date, time
 from typing import Optional
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy import text
@@ -30,6 +30,10 @@ class Slot(SQLModel, table=True):
 
     date_str: str
     time_str: str
+
+    # normalized for sorting/filtering
+    date_iso: Optional[date] = Field(default=None, index=True)
+    time_iso: Optional[time] = Field(default=None, index=True)
 
     # new fields
     obmocje: Optional[int] = Field(default=None, index=True)
@@ -124,9 +128,20 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
             row = ses.exec(q).first()
 
             if row is None:
+                # parse normalized fields
+                try:
+                    _d = datetime.strptime(it["date_str"].strip(), "%d. %m. %Y").date()
+                except Exception:
+                    _d = None
+                try:
+                    _t = datetime.strptime((it["time_str"] or "00:00").strip(), "%H:%M").time()
+                except Exception:
+                    _t = None
                 row = Slot(
                     date_str=it["date_str"],
                     time_str=it["time_str"],
+                    date_iso=_d,
+                    time_iso=_t,
                     obmocje=it.get("obmocje"),
                     town=it.get("town"),
                     exam_type=it.get("exam_type"),
@@ -153,6 +168,15 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                 row.available = (row.places_left or 0) > 0
                 row.updated_at = now
                 row.last_seen_at = scrape_ts
+                # keep normalized fields in sync
+                try:
+                    row.date_iso = datetime.strptime(it["date_str"].strip(), "%d. %m. %Y").date()
+                except Exception:
+                    pass
+                try:
+                    row.time_iso = datetime.strptime((it["time_str"] or "00:00").strip(), "%H:%M").time()
+                except Exception:
+                    pass
                 updated += 1
 
         ses.commit()
@@ -164,7 +188,7 @@ def finalize_scrape(scrape_ts: datetime):
     now = datetime.utcnow()
     with Session(engine) as ses:
         # Execute raw SQL for bulk update using SQLAlchemy's execute method
-        ses.exec(text("""
+        ses.execute(text("""
             update slot
             set places_left = 0,
                 available = false,
