@@ -55,7 +55,8 @@ def trigger(x_secret: str | None = Header(default=None)):
     try:
         slots = fetch_all_pages()
         opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
-        # finalize_scrape(scrape_ts)  # enable after verifying storage.finalize_scrape
+        finalize_scrape(scrape_ts)
+        set_last_scraped_at(scrape_ts)
         return {"opened": opened, "updated": updated, "total": len(slots)}
     except Exception:
         log.exception("trigger-scrape failed")
@@ -182,4 +183,5 @@ def slots_all(
         "count": len(out),
         "items": out,
     }
+
 
