@@ -184,19 +184,18 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
     return opened, updated, seen_keys, scrape_ts
 
 
-def finalize_scrape(scrape_ts: datetime):
+from sqlalchemy import text
+def finalize_scrape(scrape_ts):
     now = datetime.utcnow()
     stmt = text("""
-        update slot
-        set places_left = 0,
-            available = false,
-            updated_at = :now
-        where (last_seen_at is null or last_seen_at < :ts)
-          and available = true
+      update slot
+      set places_left = 0, available = false, updated_at = :now
+      where (last_seen_at is null or last_seen_at < :ts) and available = true
     """).bindparams(ts=scrape_ts, now=now)
     with Session(engine) as ses:
-        ses.execute(stmt)
+        ses.exec(stmt)
         ses.commit()
+
 
 
 class ScrapeMeta(SQLModel, table=True):
