@@ -8,4 +8,3 @@ sqlmodel==0.0.22
 psycopg2-binary==2.9.9
 alembic==1.11.1
 pydantic==2.7.1
-datetime==5.1

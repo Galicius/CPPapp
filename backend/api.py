@@ -47,7 +47,7 @@ def _serialize_slot(s: Slot, extra: set[str]):
 
 SCRAPE_SECRET = os.getenv("SCRAPE_SECRET")
 
-log = logging.getLogger("uvicorn.error")
+log = logging.getLogger(name="uvicorn.error")
 
 @app.post("/admin/trigger-scrape")
 def trigger(x_secret: str | None = Header(default=None)):

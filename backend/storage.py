@@ -186,16 +186,16 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
 
 def finalize_scrape(scrape_ts: datetime):
     now = datetime.utcnow()
+    stmt = text("""
+        update slot
+        set places_left = 0,
+            available = false,
+            updated_at = :now
+        where (last_seen_at is null or last_seen_at < :ts)
+          and available = true
+    """).bindparams(ts=scrape_ts, now=now)
     with Session(engine) as ses:
-        # Execute raw SQL for bulk update using SQLAlchemy's execute method
-        ses.execute(text("""
-            update slot
-            set places_left = 0,
-                available = false,
-                updated_at = :now
-            where (last_seen_at is null or last_seen_at < :ts)
-              and available = true
-        """), {"ts": scrape_ts, "now": now})
+        ses.execute(stmt)
         ses.commit()
 
 
