@@ -18,14 +18,16 @@ SCHED_SA = "scheduler-cppapp@hackaton-421720.iam.gserviceaccount.com"
 SCRAPE_SECRET = os.getenv("SCRAPE_SECRET", "")
 
 def _is_authorized(req: Request) -> bool:
-    # Prefer Cloud Run/IAP header
-    email = req.headers.get("X-Goog-Authenticated-User-Email")
-    if email and SCHED_SA in email:
+    # If Cloud Run IAM let the request in with OIDC, an Authorization: Bearer ... will be present.
+    # Since the service is NOT public and the Scheduler SA has run.invoker, this is sufficient.
+    auth = req.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
         return True
-    # Fallback: shared secret header
-    secret = req.headers.get("X-Secret", "")
-    if SCRAPE_SECRET and secret == SCRAPE_SECRET:
+
+    # Optional manual trigger path: shared header secret
+    if SCRAPE_SECRET and req.headers.get("X-Secret") == SCRAPE_SECRET:
         return True
+
     return False
 
 app = FastAPI(title="SlotWatch API")
@@ -62,19 +64,18 @@ def _serialize_slot(s: Slot, extra: set[str]):
     return it
 
 @app.post("/admin/trigger-scrape")
-def trigger(request: Request, x_secret: str | None = Header(default=None)):
+def trigger(request: Request):
     if not _is_authorized(request):
-        log.warning(
-            "DENY /admin/trigger-scrape email=%r has_secret=%r",
-            request.headers.get("X-Goog-Authenticated-User-Email"),
-            bool(x_secret),
-        )
+        # helpful log so you can see which path failed
+        email = request.headers.get("X-Goog-Authenticated-User-Email")
+        has_secret = bool(request.headers.get("X-Secret"))
+        log.warning("DENY /admin/trigger-scrape email=%s has_secret=%s", email, has_secret)
         raise HTTPException(status_code=403, detail="forbidden")
+
     try:
         slots = fetch_all_pages()
         opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
-        finalize_scrape(scrape_ts)   # re-enable now that storage is fixed
-        log.info("SCRAPE OK opened=%s updated=%s total=%s", opened, updated, len(slots))
+        finalize_scrape(scrape_ts)
         return {"opened": opened, "updated": updated, "total": len(slots)}
     except Exception:
         log.exception("trigger-scrape failed")
