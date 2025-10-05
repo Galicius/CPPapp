@@ -17,7 +17,7 @@ DEFAULT_SLOTS_EXTRAS = "places_left,exam_type,tolmac,obmocje,town"
 
 app = FastAPI(title="SlotWatch API")
 
-FRONTEND_ORIGINS="https://najditermin.vercel.app/"
+FRONTEND_ORIGINS="https://examalert.vercel.app/"
 _frontend_origins = os.getenv("FRONTEND_ORIGINS", "")
 ALLOWED_ORIGINS = [o.strip() for o in _frontend_origins.split(",") if o.strip()] or ["*"]
 
