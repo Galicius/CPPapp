@@ -18,16 +18,12 @@ SCHED_SA = "scheduler-cppapp@hackaton-421720.iam.gserviceaccount.com"
 SCRAPE_SECRET = os.getenv("SCRAPE_SECRET", "")
 
 def _is_authorized(req: Request) -> bool:
-    # If Cloud Run IAM let the request in with OIDC, an Authorization: Bearer ... will be present.
-    # Since the service is NOT public and the Scheduler SA has run.invoker, this is sufficient.
-    auth = req.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
+    # Cloud Run already verified this JWT against your service URL + IAM.
+    if (req.headers.get("authorization") or "").startswith("Bearer "):
         return True
-
-    # Optional manual trigger path: shared header secret
+    # Manual fallback (curl etc.)
     if SCRAPE_SECRET and req.headers.get("X-Secret") == SCRAPE_SECRET:
         return True
-
     return False
 
 app = FastAPI(title="SlotWatch API")
@@ -66,7 +62,6 @@ def _serialize_slot(s: Slot, extra: set[str]):
 @app.post("/admin/trigger-scrape")
 def trigger(request: Request):
     if not _is_authorized(request):
-        # helpful log so you can see which path failed
         email = request.headers.get("X-Goog-Authenticated-User-Email")
         has_secret = bool(request.headers.get("X-Secret"))
         log.warning("DENY /admin/trigger-scrape email=%s has_secret=%s", email, has_secret)
@@ -80,6 +75,7 @@ def trigger(request: Request):
     except Exception:
         log.exception("trigger-scrape failed")
         raise
+
 
 @app.on_event("startup")
 def _start():
