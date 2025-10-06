@@ -18,13 +18,12 @@ SCHED_SA = "scheduler-cppapp@hackaton-421720.iam.gserviceaccount.com"
 SCRAPE_SECRET = os.getenv("SCRAPE_SECRET", "")
 
 def _is_authorized(req: Request) -> bool:
-    # Cloud Run already verified this JWT against your service URL + IAM.
-    if (req.headers.get("authorization") or "").startswith("Bearer "):
+    email = req.headers.get("X-Serverless-Authorization-Email") or req.headers.get("X-Goog-Authenticated-User-Email")
+    if email and "scheduler-cppapp@hackaton-421720.iam.gserviceaccount.com" in email:
         return True
-    # Manual fallback (curl etc.)
-    if SCRAPE_SECRET and req.headers.get("X-Secret") == SCRAPE_SECRET:
-        return True
-    return False
+    secret = req.headers.get("X-Secret", "")
+    from os import getenv
+    return bool(getenv("SCRAPE_SECRET") and secret == getenv("SCRAPE_SECRET"))
 
 app = FastAPI(title="SlotWatch API")
 
@@ -60,21 +59,30 @@ def _serialize_slot(s: Slot, extra: set[str]):
     return it
 
 @app.post("/admin/trigger-scrape")
-def trigger(request: Request):
+def trigger(request: Request, x_secret: str | None = Header(default=None)):
     if not _is_authorized(request):
-        email = request.headers.get("X-Goog-Authenticated-User-Email")
-        has_secret = bool(request.headers.get("X-Secret"))
-        log.warning("DENY /admin/trigger-scrape email=%s has_secret=%s", email, has_secret)
+        log.warning("DENY /admin/trigger-scrape email=%s has_secret=%s",
+                    request.headers.get("X-Goog-Authenticated-User-Email"),
+                    bool(x_secret))
         raise HTTPException(status_code=403, detail="forbidden")
+
+    # Lazy import: avoids NameError and surfaces import-time errors clearly
+    try:
+        from scraper import fetch_all_pages  # <-- make sure this exists in your repo
+    except Exception as e:
+        log.exception("failed importing scraper module")
+        raise HTTPException(status_code=500, detail=f"scraper import failed: {e}")
 
     try:
         slots = fetch_all_pages()
+        from storage import upsert_slots, finalize_scrape  # import close to use
         opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
         finalize_scrape(scrape_ts)
-        return {"opened": opened, "updated": updated, "total": len(slots)}
-    except Exception:
+        return {"ok": True, "opened": opened, "updated": updated, "total": len(slots)}
+    except Exception as e:
         log.exception("trigger-scrape failed")
-        raise
+        # return a JSON error instead of a bare 500 text
+        raise HTTPException(status_code=500, detail=f"scrape failed: {e}")
 
 
 @app.on_event("startup")
