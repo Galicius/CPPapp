@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 from sqlalchemy import text
 
 from storage import (
-    init_db, engine, Slot, upsert_slots,
+    init_db, engine, Slot, upsert_slots, set_last_scraped_at,
     get_last_scraped_at, finalize_scrape, IS_SQLITE,
 )
 
@@ -78,6 +78,7 @@ def trigger(request: Request, x_secret: str | None = Header(default=None)):
         from storage import upsert_slots, finalize_scrape  # import close to use
         opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
         finalize_scrape(scrape_ts)
+        set_last_scraped_at(scrape_ts)  # <- add this
         return {"ok": True, "opened": opened, "updated": updated, "total": len(slots)}
     except Exception as e:
         log.exception("trigger-scrape failed")
@@ -92,34 +93,6 @@ def _start():
 @app.get("/healthz")
 def health():
     return {"ok": True}
-
-@app.get("/slots")
-def slots(
-    limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-    include_fields: str = Query(DEFAULT_SLOTS_EXTRAS),
-):
-    extra = {p.strip() for p in include_fields.split(",") if p.strip()}
-    with Session(engine) as ses:
-        if hasattr(Slot, "date_iso") and hasattr(Slot, "time_iso"):
-            order_cols = [Slot.date_iso, Slot.time_iso, Slot.id]
-        elif IS_SQLITE:
-            order_cols = [Slot.date_str, Slot.time_str, Slot.id]
-        else:
-            order_cols = [text("to_date(date_str, 'DD. MM. YYYY')"), text("time_str::time"), Slot.id]
-        q = (
-            select(Slot)
-            .where(Slot.available == True)
-            .order_by(*order_cols)
-            .offset(offset)
-            .limit(limit)
-        )
-        rows = ses.exec(q).all()
-
-    items = [_serialize_slot(s, extra) for s in rows]
-    last = get_last_scraped_at()
-    last_iso = last.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Ljubljana")).isoformat(timespec="seconds") if last else None
-    return {"last_scraped_at": last_iso, "count": len(items), "items": items}
 
 @app.get("/slots_all")
 def slots_all(
@@ -150,8 +123,8 @@ def slots_all(
             if "places_left" in extra: it["places_left"] = s.places_left
             if "tolmac" in extra:      it["tolmac"] = s.tolmac
             if "source_page" in extra: it["source_page"] = s.source_page
-            if "created_at" in extra and s.created_at: it["created_at"] = s.created_at.isoformat(timespec="seconds") + "Z"
-            if "updated_at" in extra and s.updated_at: it["updated_at"] = s.updated_at.isoformat(timespec="seconds") + "Z"
+            if "created_at" in extra and s.created_at: it["created_at"] = s.created_at.isoformat(timespec="seconds")
+            if "updated_at" in extra and s.updated_at: it["updated_at"] = s.updated_at.isoformat(timespec="seconds")
         items.append((d, _t(s.time_str), it))
 
     if cat:

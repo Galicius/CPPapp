@@ -157,27 +157,70 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                 )
                 ses.add(row)
                 opened += 1
-            else:
-                # update mutable fields
-                row.exam_type = it.get("exam_type", row.exam_type)
-                row.places_left = pl if pl is not None else row.places_left
-                row.tolmac = bool(it.get("tolmac", row.tolmac))
-                row.categories = it.get("categories", row.categories)
-                row.source_page = it.get("source_page", row.source_page)
-                row.location = it.get("location", row.location)
-                row.available = (row.places_left or 0) > 0
-                row.updated_at = now
-                row.last_seen_at = scrape_ts
-                # keep normalized fields in sync
-                try:
-                    row.date_iso = datetime.strptime(it["date_str"].strip(), "%d. %m. %Y").date()
-                except Exception:
-                    pass
-                try:
-                    row.time_iso = datetime.strptime((it["time_str"] or "00:00").strip(), "%H:%M").time()
-                except Exception:
-                    pass
-                updated += 1
+        else:
+            # update mutable fields - only bump updated_at if something changed
+            did_change = False
+
+            # exam_type
+            new_exam_type = it.get("exam_type", row.exam_type)
+            if new_exam_type != row.exam_type:
+                row.exam_type = new_exam_type
+                did_change = True
+
+            # places_left (None means "no new data" → keep old)
+            if pl is not None and pl != row.places_left:
+                row.places_left = pl
+                did_change = True
+
+            # tolmac
+            new_tolmac = bool(it.get("tolmac", row.tolmac))
+            if new_tolmac != row.tolmac:
+                row.tolmac = new_tolmac
+                did_change = True
+
+            # categories
+            new_categories = it.get("categories", row.categories)
+            if new_categories != row.categories:
+                row.categories = new_categories
+                did_change = True
+
+            # source_page
+            new_source_page = it.get("source_page", row.source_page)
+            if new_source_page != row.source_page:
+                row.source_page = new_source_page
+                did_change = True
+
+            # location (derived/back-compat)
+            new_location = it.get("location", row.location)
+            if new_location != row.location:
+                row.location = new_location
+                did_change = True
+
+            # available depends on places_left
+            new_available = (row.places_left or 0) > 0
+            if new_available != row.available:
+                row.available = new_available
+                did_change = True
+
+            # keep normalized fields in sync (no change flag; these are derived)
+            try:
+                parsed_d = datetime.strptime(it["date_str"].strip(), "%d. %m. %Y").date()
+                if parsed_d != row.date_iso:
+                    row.date_iso = parsed_d
+            except Exception:
+                pass
+            try:
+                parsed_t = datetime.strptime((it["time_str"] or "00:00").strip(), "%H:%M").time()
+                if parsed_t != row.time_iso:
+                    row.time_iso = parsed_t
+            except Exception:
+                pass
+
+            # timestamps
+            if did_change:
+                row.updated_at = now     # bump only when data actually changed
+                updated += 1             # count *changed* rows
+            row.last_seen_at = scrape_ts # always mark the row as seen this scrape
 
         ses.commit()
 
