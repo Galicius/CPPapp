@@ -70,17 +70,14 @@ def _compose_location(obmocje: Optional[int], town: Optional[str]) -> Optional[s
 # -------------------- Field parsers --------------------
 
 def _parse_places_left(node) -> Optional[int]:
-    """
-    Extracts the number of available places from the green banner text,
-    e.g. 'Še 5 prostih mest' → 5
-    """
+
     banner = node.select_one("div.contentOpomnik .lessImportant.green")
     if not banner:
         return None
 
     txt = _norm_space(banner.get_text(" ", strip=True))
-    m = re.search(r"Še\s+(\d+)\s+", txt, re.IGNORECASE)
-    return int(m.group()) if m else None
+    m = re.search(r"(\d+)", txt)
+    return int(m.group(1)) if m else None
 
 
 def _parse_exam_type(node) -> Optional[str]:

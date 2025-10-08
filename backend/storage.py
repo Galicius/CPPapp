@@ -3,6 +3,7 @@ from typing import Optional
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy import text
 import os
+import re
 from sqlmodel import create_engine
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///slots.db")
@@ -77,6 +78,19 @@ def _make_key(it: dict) -> tuple:
         (it.get("categories") or ""),
     )
 
+def _to_int_or_none(val) -> Optional[int]:
+    """
+    Safely converts 'Še 1', '1', or 1 → 1.
+    Returns None if conversion fails or no digits are found.
+    Keeps storage robust even if scraper changes.
+    """
+    if val is None:
+        return None
+    if isinstance(val, int):
+        return val
+    m = re.search(r"\d+", str(val))
+    return int(m.group()) if m else None
+
 
 def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
     """
@@ -107,7 +121,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                     it["location"] = None
 
             # places_left normalization (for display only)
-            pl = it.get("places_left")
+            pl = _to_int_or_none(it.get("places_left"))            
             try:
                 pl = int(pl) if pl is not None else None
                     # keep None when not parseable
