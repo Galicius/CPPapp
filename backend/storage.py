@@ -81,7 +81,13 @@ def _make_key(it: dict) -> tuple:
 def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
     """
     Insert new or update existing slots by unique key.
+    Meaningful change = slot appears or disappears (presence).
     Returns (opened, updated, seen_keys, scrape_ts).
+
+    - created_at: first time we saw the slot
+    - updated_at: only when availability flips (disappears or reappears)
+    - last_seen_at: set on every scrape when slot is present
+    - available: True iff present in the *latest* scrape
     """
     now = datetime.utcnow()
     scrape_ts = now
@@ -100,14 +106,15 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                 else:
                     it["location"] = None
 
-            # places_left normalization
+            # places_left normalization (for display only)
             pl = it.get("places_left")
             try:
                 pl = int(pl) if pl is not None else None
+                    # keep None when not parseable
             except Exception:
                 pl = None
-            available = (pl or 0) > 0
 
+            # stable natural key for identity
             key = (
                 it["date_str"],
                 it["time_str"],
@@ -128,7 +135,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
             row = ses.exec(q).first()
 
             if row is None:
-                # parse normalized fields
+                # parse normalized fields (best-effort)
                 try:
                     _d = datetime.strptime(it["date_str"].strip(), "%d. %m. %Y").date()
                 except Exception:
@@ -137,6 +144,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                     _t = datetime.strptime((it["time_str"] or "00:00").strip(), "%H:%M").time()
                 except Exception:
                     _t = None
+
                 row = Slot(
                     date_str=it["date_str"],
                     time_str=it["time_str"],
@@ -150,93 +158,87 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                     categories=it.get("categories", ""),
                     source_page=it.get("source_page"),
                     location=it.get("location"),
-                    available=available,
-                    created_at=now,
-                    updated_at=now,
+
+                    # presence semantics:
+                    available=True,       # present in this scrape
+                    created_at=now,       # first seen
+                    updated_at=now,       # appeared (nonexistent -> present)
                     last_seen_at=scrape_ts,
                 )
                 ses.add(row)
                 opened += 1
-        else:
-            # update mutable fields - only bump updated_at if something changed
-            did_change = False
+            else:
+                # heartbeat every scrape
+                row.last_seen_at = scrape_ts
 
-            # exam_type
-            new_exam_type = it.get("exam_type", row.exam_type)
-            if new_exam_type != row.exam_type:
-                row.exam_type = new_exam_type
-                did_change = True
+                # if it was previously unavailable, it reappeared -> meaningful change
+                if not row.available:
+                    row.available = True
+                    row.updated_at = now
+                    updated += 1
 
-            # places_left (None means "no new data" → keep old)
-            if pl is not None and pl != row.places_left:
-                row.places_left = pl
-                did_change = True
+                # keep display fields fresh WITHOUT bumping updated_at
+                if pl is not None:
+                    row.places_left = pl
 
-            # tolmac
-            new_tolmac = bool(it.get("tolmac", row.tolmac))
-            if new_tolmac != row.tolmac:
-                row.tolmac = new_tolmac
-                did_change = True
+                # (Optional) keep static/descriptive fields in sync without bumping updated_at
+                if "exam_type" in it:
+                    row.exam_type = it["exam_type"]
+                if "tolmac" in it:
+                    row.tolmac = bool(it["tolmac"])
+                if "categories" in it:
+                    row.categories = it["categories"]
+                if "source_page" in it:
+                    row.source_page = it["source_page"]
+                if "location" in it:
+                    row.location = it["location"]
 
-            # categories
-            new_categories = it.get("categories", row.categories)
-            if new_categories != row.categories:
-                row.categories = new_categories
-                did_change = True
-
-            # source_page
-            new_source_page = it.get("source_page", row.source_page)
-            if new_source_page != row.source_page:
-                row.source_page = new_source_page
-                did_change = True
-
-            # location (derived/back-compat)
-            new_location = it.get("location", row.location)
-            if new_location != row.location:
-                row.location = new_location
-                did_change = True
-
-            # available depends on places_left
-            new_available = (row.places_left or 0) > 0
-            if new_available != row.available:
-                row.available = new_available
-                did_change = True
-
-            # keep normalized fields in sync (no change flag; these are derived)
-            try:
-                parsed_d = datetime.strptime(it["date_str"].strip(), "%d. %m. %Y").date()
-                if parsed_d != row.date_iso:
-                    row.date_iso = parsed_d
-            except Exception:
-                pass
-            try:
-                parsed_t = datetime.strptime((it["time_str"] or "00:00").strip(), "%H:%M").time()
-                if parsed_t != row.time_iso:
-                    row.time_iso = parsed_t
-            except Exception:
-                pass
-
-            # timestamps
-            if did_change:
-                row.updated_at = now     # bump only when data actually changed
-                updated += 1             # count *changed* rows
-            row.last_seen_at = scrape_ts # always mark the row as seen this scrape
+                # (Optional) re-derive normalized date/time without bumping updated_at
+                try:
+                    _d = datetime.strptime(it["date_str"].strip(), "%d. %m. %Y").date()
+                    row.date_iso = _d
+                except Exception:
+                    pass
+                try:
+                    _t = datetime.strptime((it["time_str"] or "00:00").strip(), "%H:%M").time()
+                    row.time_iso = _t
+                except Exception:
+                    pass
 
         ses.commit()
 
     return opened, updated, seen_keys, scrape_ts
 
 
+
 from sqlalchemy import text
-def finalize_scrape(scrape_ts):
+def finalize_scrape(scrape_ts: datetime):
+    """
+    After each scrape finishes, mark any slots that were not seen
+    in this scrape as unavailable (they disappeared).
+
+    - A slot is considered disappeared if it was previously available
+      but its last_seen_at is older than the current scrape timestamp.
+    - When a slot disappears, we set:
+        available = False
+        places_left = 0
+        updated_at = now  (since it's a meaningful change)
+    """
     now = datetime.utcnow()
+
     stmt = text("""
-      update slot
-      set places_left = 0, available = false, updated_at = :now
-      where (last_seen_at is null or last_seen_at < :ts) and available = true
-    """).bindparams(ts=scrape_ts, now=now)
+        UPDATE slot
+        SET
+            available = FALSE,
+            places_left = 0,
+            updated_at = :now
+        WHERE
+            available = TRUE
+            AND (last_seen_at IS NULL OR last_seen_at < :scrape_ts)
+    """)
+
     with Session(engine) as ses:
-        ses.exec(stmt)
+        ses.exec(stmt, {"now": now, "scrape_ts": scrape_ts})
         ses.commit()
 
 

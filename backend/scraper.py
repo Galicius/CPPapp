@@ -79,8 +79,8 @@ def _parse_places_left(node) -> Optional[int]:
         return None
 
     txt = _norm_space(banner.get_text(" ", strip=True))
-    match = re.search(r"\d+", txt)
-    return int(match.group()) if match else None
+    m = re.search(r"Še\s+(\d+)\s+", txt, re.IGNORECASE)
+    return int(m.group()) if m else None
 
 
 def _parse_exam_type(node) -> Optional[str]:
