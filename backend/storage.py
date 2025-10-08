@@ -59,6 +59,39 @@ class Slot(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     last_seen_at: Optional[datetime] = Field(default=None, index=True)
 
+class ScrapeLog(SQLModel, table=True):
+    __tablename__ = "scrape_log"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    timestamp: datetime = Field(default_factory=datetime.utcnow, index=True)
+    opened: int = Field(default=0)
+    updated: int = Field(default=0)
+    total: int = Field(default=0)
+    success: bool = Field(default=False)
+    message: Optional[str] = Field(default=None)
+
+
+def store_scrape_log(opened: int, updated: int, total: int, success: bool, message: str = "") -> bool:
+    """
+    Stores a scrape summary into the same Postgres database (Supabase).
+    """
+    try:
+        with Session(engine) as ses:
+            row = ScrapeLog(
+                opened=opened,
+                updated=updated,
+                total=total,
+                success=success,
+                message=message,
+            )
+            ses.add(row)
+            ses.commit()
+        return True
+    except Exception as e:
+        print(f"[WARN] Failed to log scrape result: {e}")
+        return False
+
+
 def init_db():
     # SQLite pragmas for concurrency
     if IS_SQLITE:
