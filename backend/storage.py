@@ -250,6 +250,26 @@ class ScrapeMeta(SQLModel, table=True):
     id: int = Field(default=1, primary_key=True)
     last_scraped_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
+def log_scrape_result(client, opened: int, updated: int, total: int, success: bool, message: str = ""):
+    """
+    Store scrape metadata and result details in Supabase.
+    """
+    try:
+        now = datetime.utcnow().isoformat()
+        client.table("scrape_logs").insert({
+            "timestamp": now,
+            "opened": opened,
+            "updated": updated,
+            "total": total,
+            "success": success,
+            "message": message,
+        }).execute()
+    except Exception as e:
+        # Fallback logging if Supabase fails
+        print(f"[WARN] Failed to log scrape result to Supabase: {e}")
+
+
+
 def get_last_scraped_at() -> Optional[datetime]:
     with Session(engine) as ses:
         meta = ses.get(ScrapeMeta, 1)

@@ -66,24 +66,68 @@ def trigger(request: Request, x_secret: str | None = Header(default=None)):
                     bool(x_secret))
         raise HTTPException(status_code=403, detail="forbidden")
 
-    # Lazy import: avoids NameError and surfaces import-time errors clearly
+    # lazy import to keep startup clean
     try:
-        from scraper import fetch_all_pages  # <-- make sure this exists in your repo
+        from scraper import fetch_all_pages
     except Exception as e:
         log.exception("failed importing scraper module")
         raise HTTPException(status_code=500, detail=f"scraper import failed: {e}")
 
     try:
         slots = fetch_all_pages()
-        from storage import upsert_slots, finalize_scrape  # import close to use
+
+        # use your existing storage helpers
+        from storage import (
+            upsert_slots,
+            finalize_scrape,
+            set_last_scraped_at,
+            log_scrape_result,
+        )
+        # reuse a single supabase client (module you created alongside api.py/storage.py)
+        from .supabase_client import supabase_client
+
         opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
         finalize_scrape(scrape_ts)
-        set_last_scraped_at(scrape_ts)  # <- add this
-        return {"ok": True, "opened": opened, "updated": updated, "total": len(slots)}
+        set_last_scraped_at(scrape_ts)
+
+        # log details to another table in Supabase (non-blocking)
+        try:
+            log_scrape_result(
+                supabase_client,
+                opened=opened,
+                updated=updated,
+                total=len(slots),
+                success=True,
+                message=""
+            )
+        except Exception as log_err:
+            # don't fail the request just because logging failed
+            log.warning("scrape logged but Supabase log insert failed: %s", log_err)
+
+        # minimal response for cron/monitor
+        return {"ok": True}
+
     except Exception as e:
         log.exception("trigger-scrape failed")
-        # return a JSON error instead of a bare 500 text
-        raise HTTPException(status_code=500, detail=f"scrape failed: {e}")
+
+        # try to record the failure as well (best-effort)
+        try:
+            from storage import log_scrape_result
+            from .supabase_client import supabase_client
+            log_scrape_result(
+                supabase_client,
+                opened=0,
+                updated=0,
+                total=0,
+                success=False,
+                message=str(e)
+            )
+        except Exception:
+            pass
+
+        raise HTTPException(status_code=500, detail="scrape failed")
+
+
 
 
 @app.on_event("startup")
