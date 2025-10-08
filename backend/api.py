@@ -59,72 +59,63 @@ def _serialize_slot(s: Slot, extra: set[str]):
     return it
 
 @app.post("/admin/trigger-scrape")
-def trigger(request: Request, x_secret: str | None = Header(default=None)):
+def trigger(request: Request, x_secret: str | None = Header(default=None), x_debug: str | None = Header(default=None)):
     if not _is_authorized(request):
         log.warning("DENY /admin/trigger-scrape email=%s has_secret=%s",
                     request.headers.get("X-Goog-Authenticated-User-Email"),
                     bool(x_secret))
         raise HTTPException(status_code=403, detail="forbidden")
 
-    # lazy import to keep startup clean
+    stage = "import_scraper"
     try:
         from scraper import fetch_all_pages
-    except Exception as e:
-        log.exception("failed importing scraper module")
-        raise HTTPException(status_code=500, detail=f"scraper import failed: {e}")
 
-    try:
+        stage = "fetch"
         slots = fetch_all_pages()
 
-        # use your existing storage helpers
-        from storage import (
-            upsert_slots,
-            finalize_scrape,
-            set_last_scraped_at,
-            log_scrape_result,
-        )
-        # reuse a single supabase client (module you created alongside api.py/storage.py)
-        from .supabase_client import supabase_client
-
+        stage = "storage_ops"
+        from storage import upsert_slots, finalize_scrape, set_last_scraped_at, log_scrape_result
         opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
         finalize_scrape(scrape_ts)
         set_last_scraped_at(scrape_ts)
 
-        # log details to another table in Supabase (non-blocking)
+        # Inline Supabase client (only in Cloud, env-driven). Skip silently if not configured.
         try:
-            log_scrape_result(
-                supabase_client,
-                opened=opened,
-                updated=updated,
-                total=len(slots),
-                success=True,
-                message=""
-            )
-        except Exception as log_err:
-            # don't fail the request just because logging failed
-            log.warning("scrape logged but Supabase log insert failed: %s", log_err)
+            sb_url = os.getenv("SUPABASE_URL")
+            sb_key = os.getenv("SUPABASE_SERVICE_KEY")
+            if sb_url and sb_key:
+                try:
+                    from supabase import create_client
+                    sb = create_client(sb_url, sb_key)
+                    log_scrape_result(sb, opened=opened, updated=updated, total=len(slots), success=True, message="")
+                except Exception as le:
+                    log.warning("Supabase success log failed: %s", le)
+            else:
+                log.info("Supabase env not set; skipping scrape log")
+        except Exception as le:
+            log.warning("Supabase inline client init failed: %s", le)
 
-        # minimal response for cron/monitor
         return {"ok": True}
 
     except Exception as e:
-        log.exception("trigger-scrape failed")
-
-        # try to record the failure as well (best-effort)
+        # Best-effort failure log to Supabase too (if env + lib present)
         try:
             from storage import log_scrape_result
-            from .supabase_client import supabase_client
-            log_scrape_result(
-                supabase_client,
-                opened=0,
-                updated=0,
-                total=0,
-                success=False,
-                message=str(e)
-            )
+            sb_url = os.getenv("SUPABASE_URL")
+            sb_key = os.getenv("SUPABASE_SERVICE_KEY")
+            if sb_url and sb_key:
+                try:
+                    from supabase import create_client
+                    sb = create_client(sb_url, sb_key)
+                    log_scrape_result(sb, opened=0, updated=0, total=0, success=False, message=f"{stage}: {e}")
+                except Exception as le:
+                    log.warning("Supabase failure log failed: %s", le)
         except Exception:
             pass
 
+        log.exception("trigger-scrape failed at stage=%s", stage)
+        if x_debug == "1":
+            raise HTTPException(status_code=500, detail=f"{stage}: {e.__class__.__name__}: {e}")
         raise HTTPException(status_code=500, detail="scrape failed")
 
 
