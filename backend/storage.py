@@ -4,7 +4,6 @@ from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy import text
 import os
 import re
-from sqlmodel import create_engine
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///slots.db")
 
@@ -122,11 +121,6 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
 
             # places_left normalization (for display only)
             pl = _to_int_or_none(it.get("places_left"))            
-            try:
-                pl = int(pl) if pl is not None else None
-                    # keep None when not parseable
-            except Exception:
-                pl = None
 
             # stable natural key for identity
             key = (
@@ -227,19 +221,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
 
 from sqlalchemy import text
 def finalize_scrape(scrape_ts: datetime):
-    """
-    After each scrape finishes, mark any slots that were not seen
-    in this scrape as unavailable (they disappeared).
-
-    - A slot is considered disappeared if it was previously available
-      but its last_seen_at is older than the current scrape timestamp.
-    - When a slot disappears, we set:
-        available = False
-        places_left = 0
-        updated_at = now  (since it's a meaningful change)
-    """
     now = datetime.utcnow()
-
     stmt = text("""
         UPDATE slot
         SET
@@ -249,10 +231,10 @@ def finalize_scrape(scrape_ts: datetime):
         WHERE
             available = TRUE
             AND (last_seen_at IS NULL OR last_seen_at < :scrape_ts)
-    """)
+    """).bindparams(now=now, scrape_ts=scrape_ts)
 
     with Session(engine) as ses:
-        ses.exec(stmt, {"now": now, "scrape_ts": scrape_ts})
+        ses.exec(stmt)   # ← no extra dict
         ses.commit()
 
 

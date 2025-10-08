@@ -7,7 +7,7 @@ from fastapi import FastAPI, Query, Header, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 from sqlalchemy import text
-
+from scraper import fetch_all_pages
 from storage import (
     init_db, engine, Slot, upsert_slots, set_last_scraped_at,
     get_last_scraped_at, finalize_scrape, IS_SQLITE,
@@ -53,70 +53,53 @@ def _serialize_slot(s: Slot, extra: set[str]):
     if "places_left" in extra: it["places_left"] = s.places_left or 0
     if "tolmac" in extra:      it["tolmac"] = bool(s.tolmac)
     if "created_at" in extra and s.created_at:
-        it["created_at"] = s.created_at.isoformat(timespec="seconds") + "Z"
+        it["created_at"] = s.created_at.isoformat(timespec="seconds")
     if "updated_at" in extra and s.updated_at:
-        it["updated_at"] = s.updated_at.isoformat(timespec="seconds") + "Z"
+        it["updated_at"] = s.updated_at.isoformat(timespec="seconds")
     return it
 
 @app.post("/admin/trigger-scrape")
-def trigger(request: Request, x_secret: str | None = Header(default=None), x_debug: str | None = Header(default=None)):
+def trigger(
+    request: Request,
+    x_secret: str | None = Header(default=None),
+    x_debug: str | None = Header(default=None),
+):
     if not _is_authorized(request):
-        log.warning("DENY /admin/trigger-scrape email=%s has_secret=%s",
-                    request.headers.get("X-Goog-Authenticated-User-Email"),
-                    bool(x_secret))
+        log.warning(
+            "DENY /admin/trigger-scrape email=%s has_secret=%s",
+            request.headers.get("X-Goog-Authenticated-User-Email"),
+            bool(x_secret),
+        )
         raise HTTPException(status_code=403, detail="forbidden")
 
     stage = "import_scraper"
     try:
-        from scraper import fetch_all_pages
 
         stage = "fetch"
         slots = fetch_all_pages()
 
         stage = "storage_ops"
-        from storage import upsert_slots, finalize_scrape, set_last_scraped_at, log_scrape_result
+        
         opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
         finalize_scrape(scrape_ts)
         set_last_scraped_at(scrape_ts)
 
-        # Inline Supabase client (only in Cloud, env-driven). Skip silently if not configured.
-        try:
-            sb_url = os.getenv("SUPABASE_URL")
-            sb_key = os.getenv("SUPABASE_SERVICE_KEY")
-            if sb_url and sb_key:
-                try:
-                    from supabase import create_client
-                    sb = create_client(sb_url, sb_key)
-                    log_scrape_result(sb, opened=opened, updated=updated, total=len(slots), success=True, message="")
-                except Exception as le:
-                    log.warning("Supabase success log failed: %s", le)
-            else:
-                log.info("Supabase env not set; skipping scrape log")
-        except Exception as le:
-            log.warning("Supabase inline client init failed: %s", le)
-
         return {"ok": True}
 
     except Exception as e:
-        # Best-effort failure log to Supabase too (if env + lib present)
-        try:
-            from storage import log_scrape_result
-            sb_url = os.getenv("SUPABASE_URL")
-            sb_key = os.getenv("SUPABASE_SERVICE_KEY")
-            if sb_url and sb_key:
-                try:
-                    from supabase import create_client
-                    sb = create_client(sb_url, sb_key)
-                    log_scrape_result(sb, opened=0, updated=0, total=0, success=False, message=f"{stage}: {e}")
-                except Exception as le:
-                    log.warning("Supabase failure log failed: %s", le)
-        except Exception:
-            pass
-
+        # emit full traceback to Cloud Run logs with the failing stage
         log.exception("trigger-scrape failed at stage=%s", stage)
+
+        # if you *explicitly* ask for details, return them (handy for curl)
         if x_debug == "1":
-            raise HTTPException(status_code=500, detail=f"{stage}: {e.__class__.__name__}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"{stage}: {e.__class__.__name__}: {e}",
+            )
+
+        # default minimal response for cron/monitors
         raise HTTPException(status_code=500, detail="scrape failed")
+
 
 
 
