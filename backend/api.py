@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 from sqlalchemy import text
 from scraper import fetch_all_pages
 from storage import (
-    init_db, engine, Slot, upsert_slots, set_last_scraped_at,
+    init_db, engine, Slot, upsert_slots, set_last_scraped_at, store_scrape_log,
     get_last_scraped_at, finalize_scrape, IS_SQLITE,
 )
 
@@ -74,30 +74,30 @@ def trigger(
 
     stage = "import_scraper"
     try:
-
+        from scraper import fetch_all_pages
         stage = "fetch"
         slots = fetch_all_pages()
 
         stage = "storage_ops"
-        
         opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
         finalize_scrape(scrape_ts)
         set_last_scraped_at(scrape_ts)
 
+        # delegate logging to storage (best-effort, non-blocking)
+        store_scrape_log(opened=opened, updated=updated, total=len(slots), success=True, message="")
+
         return {"ok": True}
 
     except Exception as e:
-        # emit full traceback to Cloud Run logs with the failing stage
+        # try to record failure too, but never fail because of logging
+        try:
+            store_scrape_log(opened=0, updated=0, total=0, success=False, message=f"{stage}: {e.__class__.__name__}: {e}")
+        except Exception:
+            pass
+
         log.exception("trigger-scrape failed at stage=%s", stage)
-
-        # if you *explicitly* ask for details, return them (handy for curl)
         if x_debug == "1":
-            raise HTTPException(
-                status_code=500,
-                detail=f"{stage}: {e.__class__.__name__}: {e}",
-            )
-
-        # default minimal response for cron/monitors
+            raise HTTPException(status_code=500, detail=f"{stage}: {e.__class__.__name__}: {e}")
         raise HTTPException(status_code=500, detail="scrape failed")
 
 

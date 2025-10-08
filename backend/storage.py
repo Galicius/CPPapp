@@ -4,6 +4,11 @@ from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy import text
 import os
 import re
+import logging
+
+
+
+log = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///slots.db")
 
@@ -89,6 +94,34 @@ def _to_int_or_none(val) -> Optional[int]:
         return val
     m = re.search(r"\d+", str(val))
     return int(m.group()) if m else None
+
+def store_scrape_log(opened: int, updated: int, total: int, success: bool, message: str = "") -> bool:
+    """
+    Best-effort write of a scrape summary to Supabase.
+    Reads SUPABASE_URL and SUPABASE_SERVICE_KEY from env,
+    creates the client, and calls log_scrape_result(...).
+
+    Returns True if inserted, False if skipped/failed.
+    """
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not url or not key:
+        log.info("Supabase env not set; skipping scrape log")
+        return False
+
+    try:
+        from supabase import create_client
+    except Exception as e:
+        log.warning("Supabase SDK not available; skipping scrape log: %s", e)
+        return False
+
+    try:
+        sb = create_client(url, key)
+        log_scrape_result(sb, opened=opened, updated=updated, total=total, success=success, message=message)
+        return True
+    except Exception as e:
+        log.warning("Supabase insert failed: %s", e)
+        return False
 
 
 def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
