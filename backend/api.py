@@ -3,7 +3,7 @@ import os
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from fastapi import FastAPI, Query, Header, Request, HTTPException
+from fastapi import FastAPI, Query, Header, Request, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 from sqlalchemy import text
@@ -61,44 +61,46 @@ def _serialize_slot(s: Slot, extra: set[str]):
 @app.post("/admin/trigger-scrape")
 def trigger(
     request: Request,
-    x_secret: str | None = Header(default=None),
-    x_debug: str | None = Header(default=None),
+    background_tasks: BackgroundTasks,
+    x_secret: str | None = Header(default=None)
 ):
     if not _is_authorized(request):
-        log.warning(
-            "DENY /admin/trigger-scrape email=%s has_secret=%s",
-            request.headers.get("X-Goog-Authenticated-User-Email"),
-            bool(x_secret),
-        )
+        log.warning("DENY /admin/trigger-scrape email=%s has_secret=%s",
+                    request.headers.get("X-Goog-Authenticated-User-Email"),
+                    bool(x_secret))
         raise HTTPException(status_code=403, detail="forbidden")
 
-    stage = "import_scraper"
+    # ✅ schedule background job instead of blocking
+    background_tasks.add_task(run_scraper_job)
+
+def run_scraper_job():
     try:
         from scraper import fetch_all_pages
-        stage = "fetch"
-        slots = fetch_all_pages()
+        from storage import upsert_slots, finalize_scrape, set_last_scraped_at, store_scrape_log
 
-        stage = "storage_ops"
+        slots = fetch_all_pages()
         opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
         finalize_scrape(scrape_ts)
         set_last_scraped_at(scrape_ts)
 
-        # delegate logging to storage (best-effort, non-blocking)
-        store_scrape_log(opened=opened, updated=updated, total=len(slots), success=True, message="")
+        store_scrape_log(
+            opened=opened,
+            updated=updated,
+            total=len(slots),
+            success=True,
+            message="background scrape success",
+        )
 
-        return {"ok": True}
+        log.info(f"Scrape done: opened={opened}, updated={updated}, total={len(slots)}")
 
     except Exception as e:
-        # try to record failure too, but never fail because of logging
+        log.exception("Background scrape failed")
+        # Optional: log failure in DB
         try:
-            store_scrape_log(opened=0, updated=0, total=0, success=False, message=f"{stage}: {e.__class__.__name__}: {e}")
+            store_scrape_log(0, 0, 0, success=False, message=str(e))
         except Exception:
             pass
 
-        log.exception("trigger-scrape failed at stage=%s", stage)
-        if x_debug == "1":
-            raise HTTPException(status_code=500, detail=f"{stage}: {e.__class__.__name__}: {e}")
-        raise HTTPException(status_code=500, detail="scrape failed")
 
 
 
