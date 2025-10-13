@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlencode
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from storage import init_db, upsert_slots
+from storage import upsert_slots
 
 LOCAL_TZ = ZoneInfo("Europe/Ljubljana")
 
@@ -409,17 +409,3 @@ def fetch_all_pages(
             time.sleep(random.uniform(*REQUEST_PAUSE))
 
         return all_items
-
-
-# -------------------- CLI entry --------------------
-
-if __name__ == "__main__":
-    init_db()
-    slots = fetch_all_pages()
-    opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
-
-    print(f"Found {len(slots)} slots | opened(new): {opened} | touched: {updated}")
-    for i, s in enumerate(slots[:5], 1):
-        cats = s.get("categories") or "-"
-        loc = s.get("location") or "-"
-        print(f"{i}. {s['date_str']} {s['time_str']} | {loc} | {cats}")

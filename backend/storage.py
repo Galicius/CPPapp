@@ -10,22 +10,8 @@ import logging
 
 log = logging.getLogger(__name__)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///slots.db")
-
-# Put SQLite db under /tmp when running in containers
-if DATABASE_URL.startswith("sqlite:///") and not DATABASE_URL.startswith("sqlite:////"):
-    DATABASE_URL = "sqlite:////tmp/slots.db"
-
-IS_SQLITE = DATABASE_URL.startswith("sqlite:")
-
-if IS_SQLITE:
-    engine = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,
-        connect_args={"check_same_thread": False, "timeout": 30},
-    )
-else:
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+DATABASE_URL = os.getenv("DATABASE_URL")
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 class Slot(SQLModel, table=True):
     __tablename__ = "slot"  # type: ignore[assignment]
@@ -58,53 +44,6 @@ class Slot(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     last_seen_at: Optional[datetime] = Field(default=None, index=True)
-
-class ScrapeLog(SQLModel, table=True):
-    __tablename__ = "scrape_log"
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    timestamp: datetime = Field(default_factory=datetime.utcnow, index=True)
-    opened: int = Field(default=0)
-    updated: int = Field(default=0)
-    total: int = Field(default=0)
-    success: bool = Field(default=False)
-    message: Optional[str] = Field(default=None)
-
-
-def store_scrape_log(opened: int, updated: int, total: int, success: bool, message: str = "") -> bool:
-    """
-    Stores a scrape summary into the same Postgres database (Supabase).
-    """
-    try:
-        with Session(engine) as ses:
-            row = ScrapeLog(
-                opened=opened,
-                updated=updated,
-                total=total,
-                success=success,
-                message=message,
-            )
-            ses.add(row)
-            ses.commit()
-        return True
-    except Exception as e:
-        print(f"[WARN] Failed to log scrape result: {e}")
-        return False
-
-
-def init_db():
-    # SQLite pragmas for concurrency
-    if IS_SQLITE:
-        with engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
-            conn.exec_driver_sql("PRAGMA busy_timeout=30000;")
-    SQLModel.metadata.create_all(engine)
-    # ensure a singleton row exists for scrape meta
-    with Session(engine) as ses:
-        meta = ses.get(ScrapeMeta, 1)
-        if not meta:
-            ses.add(ScrapeMeta(id=1, last_scraped_at=datetime.utcnow()))
-            ses.commit()
 
 def _make_key(it: dict) -> tuple:
     return (
@@ -346,3 +285,111 @@ def set_last_scraped_at(ts: datetime):
         else:
             meta.last_scraped_at = ts
         ses.commit()
+
+
+# --- Supabase ---
+
+def _get_supabase_client():
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not url or not key:
+        return None
+    try:
+        from supabase import create_client
+        return create_client(url, key)
+    except Exception as e:
+        log.warning("Supabase SDK not available: %s", e)
+        return None
+
+
+def _normalize_dt_fields(it: dict):
+    # Mirror your local normalization for date_iso/time_iso without mutating originals
+    out = dict(it)
+    try:
+        out["date_iso"] = datetime.strptime(it["date_str"].strip(), "%d. %m. %Y").date()
+    except Exception:
+        out["date_iso"] = None
+    try:
+        out["time_iso"] = datetime.strptime((it["time_str"] or "00:00").strip(), "%H:%M").time()
+    except Exception:
+        out["time_iso"] = None
+    return out
+
+
+def sync_slots_to_supabase(items: list[dict], scrape_ts: datetime) -> bool:
+    """
+    Upsert latest view into public.slots_current and append snapshot into public.slots_history.
+    Best-effort; logs warning on failure and returns False.
+    """
+    sb = _get_supabase_client()
+    if not sb:
+        log.info("Supabase env not set or client missing; skipping slot sync")
+        return False
+
+    # Prepare batches (normalize date_iso/time_iso like local storage does)
+    rows_current = []
+    rows_history = []
+    now = datetime.utcnow().isoformat()
+
+    for it in items:
+        rec = _normalize_dt_fields(it)
+        base = {
+            "date_str": rec["date_str"],
+            "time_str": rec["time_str"],
+            "date_iso": rec["date_iso"],
+            "time_iso": rec["time_iso"],
+            "obmocje": rec.get("obmocje"),
+            "town": rec.get("town"),
+            "exam_type": rec.get("exam_type"),
+            "places_left": _to_int_or_none(rec.get("places_left")),
+            "tolmac": bool(rec.get("tolmac")),
+            "categories": rec.get("categories", "") or "",
+            "source_page": rec.get("source_page"),
+            "location": rec.get("location"),
+            "available": True,
+            "last_seen_at": scrape_ts.isoformat(),
+            "updated_at": now,
+        }
+        rows_current.append({**base, "created_at": now})
+        rows_history.append({**base, "scrape_ts": scrape_ts.isoformat()})
+
+    try:
+        # Upsert current with natural key
+        # NOTE: on_conflict columns must match unique constraint defined in SQL.
+        sb.table("slots_current") \
+          .upsert(rows_current, on_conflict="date_str,time_str,obmocje,town,categories") \
+          .execute()
+
+        # Append history
+        # Insert in chunks to avoid payload limits
+        CHUNK = 1000
+        for i in range(0, len(rows_history), CHUNK):
+            sb.table("slots_history").insert(rows_history[i:i+CHUNK]).execute()
+
+        return True
+    except Exception as e:
+        log.warning("Supabase slot sync failed: %s", e)
+        return False
+
+
+def mark_absent_in_supabase(scrape_ts: datetime) -> bool:
+    """
+    Mirror finalize_scrape semantics into slots_current:
+    any row not touched in this scrape becomes unavailable.
+    Requires last_seen_at to be set to this scrape's ts for present rows.
+    """
+    sb = _get_supabase_client()
+    if not sb:
+        return False
+    try:
+        # Use RPC or direct update via filter
+        # Supabase python client supports .update().neq()/lt() filters
+        # Mark rows with last_seen_at < scrape_ts as unavailable and places_left=0.
+        sb.table("slots_current") \
+          .update({"available": False, "places_left": 0, "updated_at": datetime.utcnow().isoformat()}) \
+          .lt("last_seen_at", scrape_ts.isoformat()) \
+          .execute()
+        return True
+    except Exception as e:
+        log.warning("Supabase finalize mirror failed: %s", e)
+        return False

@@ -9,8 +9,8 @@ from sqlmodel import Session, select
 from sqlalchemy import text
 from scraper import fetch_all_pages
 from storage import (
-    init_db, engine, Slot, upsert_slots, set_last_scraped_at, store_scrape_log,
-    get_last_scraped_at, finalize_scrape, IS_SQLITE,
+    engine, Slot, upsert_slots, set_last_scraped_at, store_scrape_log,
+    get_last_scraped_at, finalize_scrape,
 )
 
 DEFAULT_SLOTS_EXTRAS = "places_left,exam_type,tolmac,obmocje,town"
@@ -76,11 +76,21 @@ def trigger(
 def run_scraper_job():
     try:
         from scraper import fetch_all_pages
-        from storage import upsert_slots, finalize_scrape, set_last_scraped_at, store_scrape_log
+        from storage import (
+            upsert_slots, finalize_scrape, set_last_scraped_at, store_scrape_log,
+            sync_slots_to_supabase, mark_absent_in_supabase,   # <-- add
+        )
 
         slots = fetch_all_pages()
         opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
+
+        # Mirror to Supabase BEFORE local finalize so last_seen_at is consistent
+        sync_slots_to_supabase(slots, scrape_ts)               # <-- add
+
         finalize_scrape(scrape_ts)
+        # Mirror 'finalize' semantics to Supabase too
+        mark_absent_in_supabase(scrape_ts)                     # <-- add
+
         set_last_scraped_at(scrape_ts)
 
         store_scrape_log(
@@ -95,20 +105,11 @@ def run_scraper_job():
 
     except Exception as e:
         log.exception("Background scrape failed")
-        # Optional: log failure in DB
         try:
             store_scrape_log(0, 0, 0, success=False, message=str(e))
         except Exception:
             pass
 
-
-
-
-
-
-@app.on_event("startup")
-def _start():
-    init_db()
 
 @app.get("/healthz")
 def health():
