@@ -12,6 +12,7 @@ log = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+new_or_reappeared: list[dict] = []
 
 class Slot(SQLModel, table=True):
     __tablename__ = "slot"  # type: ignore[assignment]
@@ -178,6 +179,19 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                     updated_at=now,       # appeared (nonexistent -> present)
                     last_seen_at=scrape_ts,
                 )
+                                # record newly opened slot
+                new_or_reappeared.append({
+                    "date_str": it["date_str"],
+                    "time_str": it["time_str"],
+                    "obmocje": it.get("obmocje"),
+                    "town": it.get("town"),
+                    "exam_type": it.get("exam_type"),
+                    "places_left": pl,
+                    "tolmac": bool(it.get("tolmac")),
+                    "categories": it.get("categories", "") or "",
+                    "location": it.get("location"),
+                })
+
                 ses.add(row)
                 opened += 1
             else:
@@ -187,6 +201,19 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                 # if it was previously unavailable, it reappeared -> meaningful change
                 if not row.available:
                     row.available = True
+                                        # record reappeared (was unavailable -> now available)
+                    new_or_reappeared.append({
+                        "date_str": it["date_str"],
+                        "time_str": it["time_str"],
+                        "obmocje": it.get("obmocje"),
+                        "town": it.get("town"),
+                        "exam_type": it.get("exam_type"),
+                        "places_left": pl if pl is not None else row.places_left,
+                        "tolmac": bool(it.get("tolmac")) if "tolmac" in it else bool(row.tolmac),
+                        "categories": it.get("categories", row.categories) or "",
+                        "location": it.get("location", row.location),
+                    })
+
                     row.updated_at = now
                     updated += 1
 
@@ -220,7 +247,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
 
         ses.commit()
 
-    return opened, updated, seen_keys, scrape_ts
+    return opened, updated, seen_keys, scrape_ts, new_or_reappeared
 
 
 

@@ -82,16 +82,29 @@ def run_scraper_job():
         )
 
         slots = fetch_all_pages()
-        opened, updated, seen_keys, scrape_ts = upsert_slots(slots)
+        opened, updated, seen_keys, scrape_ts, changes = upsert_slots(slots)
 
         # Mirror to Supabase BEFORE local finalize so last_seen_at is consistent
-        sync_slots_to_supabase(slots, scrape_ts)               # <-- add
+        sync_slots_to_supabase(slots, scrape_ts)            # <-- add
 
         finalize_scrape(scrape_ts)
         # Mirror 'finalize' semantics to Supabase too
         mark_absent_in_supabase(scrape_ts)                     # <-- add
 
         set_last_scraped_at(scrape_ts)
+
+        # --- Notifications ---
+        try:
+            from notifications import notify_subscribers_for_changes, send_test_email
+            sent = notify_subscribers_for_changes(changes, scrape_ts)
+            _ = send_test_email(
+                {"scrape_ts": scrape_ts.isoformat(), "total": len(slots), "opened": opened, "updated": updated},
+                changes
+            )
+            log.info(f"Notifications sent: subs={sent}, test=ok")
+        except Exception as ne:
+            log.warning(f"Notification step failed: {ne}")
+
 
         store_scrape_log(
             opened=opened,
