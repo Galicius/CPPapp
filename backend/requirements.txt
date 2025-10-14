@@ -8,3 +8,13 @@ sqlmodel==0.0.22
 psycopg2-binary==2.9.9
 alembic==1.11.1
 pydantic==2.7.1
+
+# Required for Supabase sync and logging
+supabase>=2.4.0
+gotrue>=2.4.2
+postgrest>=0.16.2
+realtime>=1.1.0
+storage3>=0.7.4
+
+# Optional but recommended utilities
+python-dotenv>=1.0.1
