@@ -195,7 +195,7 @@ def send_test_email(scrape_stats: dict, changes: List[Dict[str, Any]]) -> bool:
     """
     Always send a short test mail to gal.gustin@gmail.com with scrape summary.
     """
-    to = "gal.gustin@gmail.com"
+    to = "gal.gustin@student.um.si"
     n_changes = len(changes)
     subject = f"[Test] Scrape {scrape_stats.get('scrape_ts')}: {scrape_stats.get('total')} fetched, new/reappear {n_changes}"
     lines = ["Scrape summary:",
