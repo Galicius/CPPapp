@@ -9,7 +9,7 @@ from storage import _get_supabase_client
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_API_URL = "https://api.resend.com/emails"
-MAIL_FROM = os.getenv("MAIL_FROM", "ExamAlert <onboarding@resend.dev>")
+MAIL_FROM = os.getenv("MAIL_FROM", "ExamAlert <obvestila@vozniski.si>")
 FRONTEND_UNSUB_BASE = os.getenv("FRONTEND_UNSUB_BASE", "https://examalert.vercel.app/unsubscribe")
 
 def _resend_send(to: List[str] | str, subject: str, html: str, text: Optional[str] = None) -> bool:
