@@ -5,7 +5,8 @@ import os
 import httpx
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
-from storage import _get_supabase_client
+from storage import _get_supabase_client, log_scrape_result
+from zoneinfo import ZoneInfo
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_API_URL = "https://api.resend.com/emails"
@@ -209,3 +210,102 @@ def send_test_email(scrape_stats: dict, changes: List[Dict[str, Any]]) -> bool:
     text = "\n".join(lines)
     html = "<pre>" + "\n".join(lines) + "</pre>"
     return _resend_send(to, subject, html, text)
+
+# --- Daily summary (once per day) ---
+
+def _dt_range_for_local_day(now_utc: datetime, tz: str = "Europe/Ljubljana") -> tuple[str, str, str]:
+    """
+    Return (day_label, start_iso_utc, end_iso_utc) where start/end bound the local calendar day.
+    day_label = 'YYYY-MM-DD' in local time (used for subject + idempotency marker)
+    """
+    local = now_utc.astimezone(ZoneInfo(tz))
+    day_label = local.date().isoformat()
+
+    start_local = datetime(local.year, local.month, local.day, 0, 0, 0, tzinfo=ZoneInfo(tz))
+    end_local   = datetime(local.year, local.month, local.day, 23, 59, 59, tzinfo=ZoneInfo(tz))
+
+    start_utc = start_local.astimezone(ZoneInfo("UTC")).isoformat()
+    end_utc   = end_local.astimezone(ZoneInfo("UTC")).isoformat()
+    return day_label, start_utc, end_utc
+
+
+def send_daily_summary_if_due(now_utc: datetime) -> bool:
+    """
+    Sends at most one summary email per local day (Europe/Ljubljana).
+    Aggregates today's rows from scrape_logs, emails totals + per-scrape lines,
+    then inserts a marker row `message='daily_summary_sent YYYY-MM-DD'`.
+    Returns True if an email was sent.
+    """
+    sb = _get_supabase_client()
+    if not sb or not RESEND_API_KEY:
+        return False
+
+    day_label, start_iso_utc, end_iso_utc = _dt_range_for_local_day(now_utc, "Europe/Ljubljana")
+    marker_msg = f"daily_summary_sent {day_label}"
+
+    try:
+        # Idempotency check
+        chk = sb.table("scrape_logs").select("id").eq("message", marker_msg).execute()
+        if (chk.data or []):
+            return False
+
+        # Pull today's logs
+        res = sb.table("scrape_logs") \
+                .select("timestamp,opened,updated,total,success,message") \
+                .gte("timestamp", start_iso_utc) \
+                .lte("timestamp", end_iso_utc) \
+                .order("timestamp", desc=False) \
+                .execute()
+        rows = list(res.data or [])
+    except Exception:
+        return False
+
+    if not rows:
+        return False
+
+    # Aggregate
+    agg_opened = sum(int(r.get("opened") or 0) for r in rows)
+    agg_updated = sum(int(r.get("updated") or 0) for r in rows)
+    agg_total = sum(int(r.get("total") or 0) for r in rows)
+    n_scrapes = len(rows)
+
+    # Build body
+    lines = []
+    lines.append(f"Daily scrape summary for {day_label}")
+    lines.append("")
+    lines.append(f"Scrapes: {n_scrapes}")
+    lines.append(f"Opened total: {agg_opened}")
+    lines.append(f"Reappeared total: {agg_updated}")
+    lines.append(f"Fetched total (sum over scrapes): {agg_total}")
+    lines.append("")
+    lines.append("Per-scrape timeline (UTC):")
+    for r in rows:
+        ts = r.get("timestamp")
+        ok = "ok" if r.get("success") else "FAIL"
+        lines.append(
+            f" - {ts}: opened={int(r.get('opened') or 0)}, reappeared={int(r.get('updated') or 0)}, fetched={int(r.get('total') or 0)} [{ok}]"
+        )
+
+    text = "\n".join(lines)
+    html = "<pre>" + text + "</pre>"
+    subject = f"[Daily] Scrape summary {day_label} — {n_scrapes} runs, opened {agg_opened}, reappeared {agg_updated}"
+
+    to = "gal.gustin@student.um.si"
+    ok = _resend_send(to, subject, html, text)
+    if not ok:
+        return False
+
+    # Marker row to prevent duplicate sends the same day
+    try:
+        log_scrape_result(sb, opened=0, updated=0, total=0, success=True, message=marker_msg)
+    except Exception:
+        try:
+            sb.table("scrape_logs").insert({
+                "timestamp": datetime.utcnow().isoformat(),
+                "opened": 0, "updated": 0, "total": 0,
+                "success": True, "message": marker_msg,
+            }).execute()
+        except Exception:
+            pass
+
+    return True

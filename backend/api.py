@@ -95,15 +95,13 @@ def run_scraper_job():
 
         # --- Notifications ---
         try:
-            from notifications import notify_subscribers_for_changes, send_test_email
+            from notifications import notify_subscribers_for_changes, send_daily_summary_if_due
             sent = notify_subscribers_for_changes(changes, scrape_ts)
-            _ = send_test_email(
-                {"scrape_ts": scrape_ts.isoformat(), "total": len(slots), "opened": opened, "updated": updated},
-                changes
-            )
-            log.info(f"Notifications sent: subs={sent}, test=ok")
+            _ = send_daily_summary_if_due(scrape_ts)  # once/day daily rollup
+            log.info(f"Notifications sent: subs={sent}, daily_summary=attempted")
         except Exception as ne:
             log.warning(f"Notification step failed: {ne}")
+
 
 
         store_scrape_log(
