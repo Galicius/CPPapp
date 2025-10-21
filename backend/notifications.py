@@ -47,7 +47,7 @@ def _slot_line(it: Dict[str, Any]) -> str:
         f"kat: {it.get('categories') or '-'}",
     ]
     if it.get("exam_type"):
-        parts.append(f"tip: {it['exam_type']}")
+        parts.append(f"Tip izpita: {it['exam_type']}")
     if it.get("tolmac") is not None:
         parts.append(f"tolmač: {_fmt_bool_si(bool(it['tolmac']))}")
     if it.get("places_left") is not None:
@@ -60,13 +60,13 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
     label_cat = sub.get("filter_categories") or "vse kategorije"
     label_tip = sub.get("filter_exam_type") or "teorija/vožnja"
     n = len(items)
-    subject = f"Novi termini ({n}) — {label_loc}, {label_cat}, {label_tip}"
+    subject = f"Novi termini ({n}) za filter: {label_loc}, {label_cat}, {label_tip}"
 
     # plain text
     lines = []
-    lines.append("Pozdrav,")
+    lines.append("Pozdravljeni,")
     lines.append("")
-    lines.append("Našli smo nove termine, ki ustrezajo vašim nastavitvam:")
+    lines.append("Na voljo so novi termini, ki ustrezajo vašim nastavitvam:")
     crit = []
     if sub.get("filter_obmocje") is not None:
         crit.append(f"Območje {int(sub['filter_obmocje'])}")
@@ -91,8 +91,8 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
 
     # very simple HTML
     html_lines = []
-    html_lines.append("<p>Pozdrav,</p>")
-    html_lines.append("<p>Našli smo nove termine, ki ustrezajo vašim nastavitvam:</p>")
+    html_lines.append("<p>Pozdravljeni,</p>")
+    html_lines.append("<p>Na voljo so novi termini, ki ustrezajo vašim nastavitvam:</p>")
     if crit:
         html_lines.append("<p>" + " • ".join(crit) + "</p>")
     html_lines.append("<ul>")
@@ -100,7 +100,7 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
         html_lines.append(f"<li>{_slot_line(it)}</li>")
     html_lines.append("</ul>")
     if unsub:
-        html_lines.append(f'<p>Odjava: <a href="{FRONTEND_UNSUB_BASE}?token={unsub}">{FRONTEND_UNSUB_BASE}?token={unsub}</a></p>')
+        html_lines.append(f'<p><a href="{FRONTEND_UNSUB_BASE}?token={unsub}">Odjava od obvestil</a></p>')
     html = "\n".join(html_lines)
 
     return subject, text, html

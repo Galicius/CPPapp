@@ -21,19 +21,19 @@ LOCAL_TZ = ZoneInfo("Europe/Ljubljana")
 # -------------------- Config --------------------
 
 BASE = "https://e-uprava.gov.si"
-MAIN = f"{BASE}/javne-evidence/prosti-termini.html?lang=si"
-AJAX = f"{BASE}/si/javne-evidence/prosti-termini/content/singleton.html"
+# new landing that sets cookies, referer, etc.
+MAIN = f"{BASE}/si/javne-evidence/prosti-termini-zemljevid.html?lang=si"
+# new AJAX singleton (table layout)
+AJAX = f"{BASE}/si/javne-evidence/prosti-termini-zemljevid/content/singleton.html"
 
 MAX_PAGES = 300               # hard safety cap
 MAX_DAYS_AHEAD = 30           # stop when a slot's date is beyond this many days
 REQUEST_PAUSE = (0.6, 1.1)    # random sleep range between pages (seconds)
-# --- top-level config ---
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
 OUTDIR = os.getenv("OUTDIR", "/tmp/debug_pages")
 if DEBUG:
     os.makedirs(OUTDIR, exist_ok=True)
-
 
 
 # -------------------- Utils --------------------
@@ -42,22 +42,11 @@ def _norm_space(s: str) -> str:
     return " ".join(s.replace("\xa0", " ").split())
 
 
-def _soup(html: str) -> BeautifulSoup:
-    # Prefer lxml if installed; fallback otherwise.
-    try:
-        return BeautifulSoup(html, "lxml")
-    except Exception:
-        return BeautifulSoup(html, "html.parser")
-
-
 def _text(el) -> str:
     return " ".join(el.get_text(" ", strip=True).split()) if el else ""
 
 
 def _compose_location(obmocje: Optional[int], town: Optional[str]) -> Optional[str]:
-    """
-    Back-compat display string (storage used it previously).
-    """
     if obmocje is None and not town:
         return None
     if obmocje is not None and town:
@@ -67,43 +56,22 @@ def _compose_location(obmocje: Optional[int], town: Optional[str]) -> Optional[s
     return town
 
 
-# -------------------- Field parsers --------------------
+def _parse_iso(date_str: str, time_str: str) -> Tuple[Optional[str], Optional[str]]:
+    # input like "14. 10. 2025" and "8:30"
+    try:
+        d = datetime.strptime(date_str.strip(), "%d. %m. %Y").date()
+        t = datetime.strptime(time_str.strip(), "%H:%M").time()
+        return (d.isoformat(), t.strftime("%H:%M:%S"))
+    except Exception:
+        return (None, None)
 
-def _parse_places_left(node) -> Optional[int]:
-    banner = node.select_one("div.contentOpomnik .lessImportant.green")
-    if not banner:
-        return None
-    txt = _norm_space(banner.get_text(" ", strip=True))
-    m = re.search(r"\d+", txt)
-    return int(m.group()) if m else None
 
-
-def _parse_exam_type(node) -> Optional[str]:
-    """
-    'Preverjanje znanja vožnje'  -> 'voznja'
-    'Preverjanje znanja teorije' -> 'teorija'
-    """
-    co = node.select_one("div.contentOpomnik")
-    if not co:
-        return None
-    t = _text(co).lower()
-    if "preverjanje znanja vožnje" in t:
-        return "voznja"
-    if "preverjanje znanja teorije" in t:
-        return "teorija"
-    return None
-
+# -------------------- Town extraction --------------------
 
 def _clean_town(raw: str) -> Optional[str]:
-    """
-    Normalize town name:
-      - Extract only the first matching town keyword from the območje mapping
-      - Transform to 'Title Case' (Novo mesto, Slovenska Bistrica, ...)
-    """
-    raw = raw.replace(",", " ")
-    tokens = [t for t in raw.split() if t]
+    if not raw:
+        return None
 
-    # Mapa območij -> mesta (glede na tvojo drugo sliko)
     obmocje_map = {
         1: ["Ajdovščina", "Idrija", "Ilirska Bistrica", "Koper", "Nova Gorica",
             "Postojna", "Sežana", "Tolmin"],
@@ -115,135 +83,112 @@ def _clean_town(raw: str) -> Optional[str]:
         5: ["Maribor", "Murska Sobota", "Ormož", "Ptuj", "Slovenska Bistrica"],
     }
 
-    raw_lower = raw.lower()
-
-    # Poišči prvo mesto, ki se nahaja v raw
-    for obm, mesta in obmocje_map.items():
-        for town in mesta:
-            if town.lower() in raw_lower:
-                return town  # vrne že pravilno zapisano (title case iz slovarja)
-
-    # fallback: če nič ne ujame, uporabi prvi uppercase token
-    parts: List[str] = []
-    for tok in tokens:
-        if re.match(r"^\d", tok):
-            break
-        if tok[0].islower():
-            break
-        if tok.lower() in {"ulica", "cesta", "naselje", "center", "trg",
-                           "testirnica", "vožnja", "voznja"}:
-            break
-        if tok.upper() == tok:
-            parts.append(tok.capitalize())
-        else:
-            break
-
-    town = " ".join(parts).strip(" .,")
-
-    return town or None
+    low = raw.lower()
+    for _, mesta in obmocje_map.items():
+        for city in mesta:
+            if city.lower() in low:
+                return city
+    return None
 
 
-
-def _parse_obmocje_and_town(node) -> Tuple[Optional[int], Optional[str], bool]:
-    """
-    From 'upperOpomnikDiv' line extract:
-      - obmocje (int from 'Območje X')
-      - town    (caps city name only)
-      - tolmac  (True if 'tolmač' appears)
-    """
-    upper = node.select_one("div.contentOpomnik div.upperOpomnikDiv")
-    if not upper:
-        return None, None, False
-
-    raw = _norm_space(_text(upper))
-
-    # Območje
-    m_zone = re.search(r"Območje\s+(\d+)", raw, re.IGNORECASE)
-    obmocje = int(m_zone.group(1)) if m_zone else None
-
-    # Tolmač — allow c/č variants
-    tolmac = bool(re.search(r"tolma[cč]", raw, re.IGNORECASE))
-
-    # Town: take substring after the first comma, then clean to CAPS-only name
-    after = raw.split(",", 1)[1].strip() if "," in raw else raw
-    town = _clean_town(after)
-
-    return obmocje, town, tolmac
-
-
-def _normalize_categories(text: str) -> List[str]:
-    cats: List[str] = []
-    if "Kategorije:" in text:
-        after = text.split("Kategorije:", 1)[1]
-        for tok in after.replace(",", " ").split():
-            t = tok.strip(" ,;/|")
-            if t and len(t) <= 3:  # A, A2, B1, G, F ...
-                cats.append(t)
-    return cats
-
+# -------------------- Parser for new singleton layout --------------------
 
 def _parse_block_node(node) -> Dict:
     """
-    Parse a single <div class="js_dogodekBox dogodek"> card into a dict.
+    Parse a (summary_tr, details_tr) tuple from the new singleton table.
+    Returns a dict compatible with your DB/upsert expectations.
     """
-    # Date from calendar box
-    date_str: Optional[str] = None
-    cal = node.select_one("div.calendarBox")
+    summary_tr, details_tr = node
+
+    def _tx(el):
+        return re.sub(r"\s+", " ", (el.get_text(strip=True) if el else "")).strip()
+
+    # date
+    date_str = None
+    cal = summary_tr.select_one(".calendarBox")
     if cal and cal.has_attr("aria-label"):
         date_str = cal["aria-label"].strip()
     if not date_str:
-        sr = node.select_one("div.calendarBox .sr-only")
+        sr = summary_tr.select_one(".calendarBox .sr-only")
         if sr:
-            date_str = _text(sr)
+            date_str = _tx(sr)
 
-    # Time from 'Začetek ob <span class="bold">HH:MM</span>'
-    time_str: Optional[str] = None
-    for d in node.select("div.contentOpomnik > div"):
-        txt = _text(d)
-        if "Začetek ob" in txt:
-            b = d.select_one("span.bold")
-            if b:
-                time_str = _text(b)
-            else:
-                m = re.search(r"\b(\d{1,2}:\d{2})\b", txt)
-                if m:
-                    time_str = m.group(1)
+    # time (td[data-th="Ura"])
+    time_str = None
+    for td in summary_tr.select("td"):
+        if (td.get("data-th") or "").strip().lower() == "ura":
+            time_str = _tx(td)
             break
 
-    # Categories
-    categories: List[str] = []
-    for d in node.select("div.contentOpomnik > div"):
-        if "Kategorije:" in _text(d):
-            for sp in d.select("span.bold"):
-                t = _text(sp).rstrip(",")
-                if t:
-                    categories.append(t)
+    # city/obmocje from summary "Tip / Lokacija" cell
+    dic = summary_tr.select_one(".contentOpomnik")
+    city = _tx(dic.select_one(".dicTitle1")) if dic else ""
+    obm_txt = _tx(dic.select_one(".dicDisclaimer")) if dic else ""
+    m_zone = re.search(r"Območje\s+(\d+)", obm_txt, re.IGNORECASE)
+    obmocje = int(m_zone.group(1)) if m_zone else None
+
+    # details row: full address and exam type
+    full_loc = _tx(details_tr.select_one(".dicTitle2")) if details_tr else ""
+    location = full_loc or city or None
+
+    # town: prefer details (address), fallback to summary city
+    town = _clean_town(full_loc) or _clean_town(city) or None
+
+    # exam type
+    details_text = _tx(details_tr) if details_tr else ""
+    lt = details_text.lower()
+    if "preverjanje znanja vožnje" in lt:
+        exam_type = "voznja"
+    elif "preverjanje znanja teorije" in lt:
+        exam_type = "teorija"
+    else:
+        st = _tx(summary_tr).lower()
+        if "preverjanje znanja vožnje" in st:
+            exam_type = "voznja"
+        elif "preverjanje znanja teorije" in st:
+            exam_type = "teorija"
+        else:
+            exam_type = None
+
+    # categories (td[data-th="Kategorije"])
+    cats = ""
+    for td in summary_tr.select("td"):
+        if (td.get("data-th") or "").strip().lower() == "kategorije":
+            raw = _tx(td)
+            parts = [p.strip() for p in raw.split(",")]
+            cats = ",".join([p for p in parts if p])
             break
 
-    # Places left (green box)
-    places_left = _parse_places_left(node)
+    # places left (td[data-th="Prosta mesta"])
+    places_left = None
+    for td in summary_tr.select("td"):
+        if (td.get("data-th") or "").strip().lower() == "prosta mesta":
+            m = re.search(r"\d+", _tx(td))
+            places_left = int(m.group(0)) if m else None
+            break
 
-    # Exam type
-    exam_type = _parse_exam_type(node)
+    # tolmač mention (allow c/č variants)
+    tolmac = bool(re.search(r"tolma[cč]", (_tx(summary_tr) + " " + details_text).lower()))
 
-    # Območje + Town + Tolmač (from line containing 'Območje X, <town> ...')
-    obmocje, town, tolmac_from_line = _parse_obmocje_and_town(node)
+    date_iso, time_iso = (None, None)
+    if date_str and time_str:
+        date_iso, time_iso = _parse_iso(date_str, time_str)
 
-    # Additional tolmac check anywhere inside content block
-    co = node.select_one("div.contentOpomnik")
-    tolmac_anywhere = ("tolmač" in _text(co).lower()) if co else False
-    tolmac = bool(tolmac_from_line or tolmac_anywhere)
+    available = bool((places_left or 0) > 0)
 
-    # Build record
     return {
         "date_str": date_str,
         "time_str": time_str,
+        "date_iso": date_iso,
+        "time_iso": time_iso,
         "obmocje": obmocje,
         "town": town,
         "exam_type": exam_type,
         "places_left": places_left,
-        "tolmac": tolmac,
-        "categories": ",".join(categories),
+        "tolmac": bool(tolmac),
+        "categories": cats,
+        "location": location,
+        "available": available,
     }
 
 
@@ -258,10 +203,20 @@ def _get(session: httpx.Client, url: str, headers: dict):
 
 def _extract_blocks(html: str):
     """
-    Return a list of <div class="js_dogodekBox dogodek"> nodes.
+    New layout (singleton): table rows come in pairs:
+      - summary:  <tr class="js_dogodekBox js_dicDetailsBtnRow">
+      - details:  the immediate next <tr class="js_dicDetails">
+    Returns list of (summary_tr, details_tr) tuples.
     """
-    soup = _soup(html)
-    return soup.select("div.dogodki div#results div.js_dogodekBox.dogodek")
+    soup = BeautifulSoup(html, "html.parser")
+    results = soup.select_one("div#results")
+    if not results:
+        return []
+    out = []
+    for tr in results.select("table.responsiveTable tr.js_dogodekBox.js_dicDetailsBtnRow"):
+        det = tr.find_next_sibling("tr", class_="js_dicDetails")
+        out.append((tr, det))
+    return out
 
 
 # -------------------- Main fetcher --------------------
@@ -300,10 +255,11 @@ def fetch_all_pages(
             print(f"[warmup] {warm.status_code} cookies={s.cookies}")
 
         headers = {
-            "X-Requested-With": "XMLHttpRequest",
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/html, */*;q=0.1",
             "Referer": MAIN,
-            "Accept": "text/html, */*;q=0.01",
         }
+
         base = dict(
             lang="si",
             type=type_,
@@ -322,19 +278,15 @@ def fetch_all_pages(
         last_len = None
 
         for page in range(0, max_pages):
-            # Build params: first request => NO "page" param
-            params = {**base}
-            if page > 0:
-                params["page"] = page  # page=1 is the SECOND batch
-
+            # singleton works with page=0, keep explicit
+            params = {**base, "page": page}
             url = f"{AJAX}?{urlencode(params)}"
             resp = _get(s, url, headers)
             html = resp.text
 
-            human_page = "first" if page == 0 else f"page {page}"
-            # guard writes
+            human_page = f"page {page}"
             if DEBUG and page <= 1:
-                with open(os.path.join(OUTDIR, f"page_{page or 1}.html"), "w", encoding="utf-8") as f:
+                with open(os.path.join(OUTDIR, f"page_{page}.html"), "w", encoding="utf-8") as f:
                     f.write(html)
 
             if not html or (last_len is not None and len(html) == last_len and len(html) < 100):
@@ -384,21 +336,11 @@ def fetch_all_pages(
                     continue
                 seen.add(key)
 
-                # back-compat 'location' for storage/printing
-                location_str = _compose_location(info.get("obmocje"), info.get("town"))
+                # enrich and map to the DB shape you posted
+                item = dict(info)  # includes date_iso, time_iso, available, location
+                item["source_page"] = page
 
-                all_items.append({
-                    "date_str": info["date_str"],
-                    "time_str": info["time_str"],
-                    "obmocje": info["obmocje"],
-                    "town": info["town"],
-                    "exam_type": info["exam_type"],
-                    "places_left": info["places_left"],
-                    "tolmac": info["tolmac"],
-                    "categories": info.get("categories", ""),
-                    "location": location_str,      # <- keep for storage compatibility
-                    "source_page": page,
-                })
+                all_items.append(item)
                 page_new += 1
 
             if stop_due_to_cutoff:
@@ -409,3 +351,17 @@ def fetch_all_pages(
             time.sleep(random.uniform(*REQUEST_PAUSE))
 
         return all_items
+
+
+# -------------------- Cloud entrypoint --------------------
+
+def main(request=None):
+    slots = fetch_all_pages()
+    opened, updated = upsert_slots(slots)
+    if DEBUG:
+        print(f"Found {len(slots)} slots | opened(new): {opened} | touched: {updated}")
+        for i, s in enumerate(slots[:5], 1):
+            cats = s.get("categories") or "-"
+            loc = s.get("location") or "-"
+            print(f"{i}. {s['date_str']} {s['time_str']} | {loc} | {cats}")
+    return {"count": len(slots), "opened": opened, "updated": updated}
