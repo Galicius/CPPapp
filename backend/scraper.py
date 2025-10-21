@@ -351,17 +351,3 @@ def fetch_all_pages(
             time.sleep(random.uniform(*REQUEST_PAUSE))
 
         return all_items
-
-
-# -------------------- Cloud entrypoint --------------------
-
-def main(request=None):
-    slots = fetch_all_pages()
-    opened, updated = upsert_slots(slots)
-    if DEBUG:
-        print(f"Found {len(slots)} slots | opened(new): {opened} | touched: {updated}")
-        for i, s in enumerate(slots[:5], 1):
-            cats = s.get("categories") or "-"
-            loc = s.get("location") or "-"
-            print(f"{i}. {s['date_str']} {s['time_str']} | {loc} | {cats}")
-    return {"count": len(slots), "opened": opened, "updated": updated}
