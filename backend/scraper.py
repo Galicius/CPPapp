@@ -39,6 +39,34 @@ def _norm_space(s: str) -> str:
 def _text(el) -> str:
     return " ".join(el.get_text(" ", strip=True).split()) if el else ""
 
+def _row_date_str(tr) -> Optional[str]:
+    """
+    Return the date string (e.g. '24. 10. 2025') for a summary row.
+    If the row doesn't contain the calendar cell (due to rowspan),
+    walk backwards to the nearest previous row that does.
+    """
+    def _from_calendar(t):
+        cal = t.select_one(".calendarBox")
+        if not cal:
+            return None
+        # Prefer aria-label; fallback to sr-only text
+        s = cal.get("aria-label") or _text(cal.select_one(".sr-only"))
+        return s.strip() if s else None
+
+    # Try current row
+    s = _from_calendar(tr)
+    if s:
+        return s
+
+    # Walk backwards across previous rows until a calendar is found
+    p = tr.find_previous("tr")
+    while p:
+        s = _from_calendar(p)
+        if s:
+            return s
+        p = p.find_previous("tr")
+    return None
+
 
 def _compose_location(obmocje: Optional[int], town: Optional[str]) -> Optional[str]:
     if obmocje is None and not town:
@@ -101,7 +129,8 @@ def _parse_block_node(node) -> Dict:
         return re.sub(r"\s+", " ", (el.get_text(strip=True) if el else "")).strip()
 
     # date
-    date_str = None
+        # date
+    date_str = _row_date_str(summary_tr)
     cal = summary_tr.select_one(".calendarBox")
     if cal and cal.has_attr("aria-label"):
         date_str = cal["aria-label"].strip()
