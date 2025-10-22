@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_API_URL = "https://api.resend.com/emails"
 MAIL_FROM = os.getenv("MAIL_FROM", "ExamAlert <obvestila@vozniski.si>")
-FRONTEND_UNSUB_BASE = os.getenv("FRONTEND_UNSUB_BASE", "https://examalert.vercel.app/unsubscribe")
+FRONTEND_UNSUB_BASE = os.getenv("FRONTEND_UNSUB_BASE", "https://vozniski.si/unsubscribe")
 
 def _resend_send(to: List[str] | str, subject: str, html: str, text: Optional[str] = None) -> bool:
     if not RESEND_API_KEY:

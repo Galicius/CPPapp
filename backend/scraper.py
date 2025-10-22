@@ -45,6 +45,33 @@ def _norm_space(s: str) -> str:
 def _text(el) -> str:
     return " ".join(el.get_text(" ", strip=True).split()) if el else ""
 
+# Inherit the date from the nearest previous row that has the calendar cell.
+def _row_date_str(tr) -> Optional[str]:
+    def _from_calendar(t) -> Optional[str]:
+        cal = t.select_one(".calendarBox")
+        if not cal:
+            return None
+        s = cal.get("aria-label") or _text(cal.select_one(".sr-only")) or ""
+        s = s.strip()
+        if not s:
+            return None
+        # Be robust to aria-label like "petek, 24. 10. 2025" — extract the date part.
+        m = re.search(r"\b(\d{1,2}\.\s*\d{1,2}\.\s*\d{4})\b", s)
+        return m.group(1) if m else s
+
+    # Current row
+    s = _from_calendar(tr)
+    if s:
+        return s
+
+    # Walk backwards until a calendar cell is found
+    p = tr.find_previous("tr")
+    while p:
+        s = _from_calendar(p)
+        if s:
+            return s
+        p = p.find_previous("tr")
+    return None
 
 def _compose_location(obmocje: Optional[int], town: Optional[str]) -> Optional[str]:
     if obmocje is None and not town:
@@ -104,14 +131,7 @@ def _parse_block_node(node) -> Dict:
         return re.sub(r"\s+", " ", (el.get_text(strip=True) if el else "")).strip()
 
     # date
-    date_str = None
-    cal = summary_tr.select_one(".calendarBox")
-    if cal and cal.has_attr("aria-label"):
-        date_str = cal["aria-label"].strip()
-    if not date_str:
-        sr = summary_tr.select_one(".calendarBox .sr-only")
-        if sr:
-            date_str = _tx(sr)
+    date_str = _row_date_str(summary_tr)
 
     # time (td[data-th="Ura"])
     time_str = None
