@@ -301,8 +301,6 @@ def fetch_all_pages(
             blocks = _extract_blocks(html)
             if DEBUG:
                 print(f"[page {page}] blocks detected: {len(blocks)}")
-            if not blocks:
-                break
 
             stop_due_to_cutoff = False
             page_new = 0
@@ -361,8 +359,6 @@ def fetch_all_pages(
                 page_new += 1
 
             if stop_due_to_cutoff:
-                break
-            if page_new == 0:
                 break
 
             time.sleep(random.uniform(*REQUEST_PAUSE))

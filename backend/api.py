@@ -14,7 +14,7 @@ from storage import init_db, engine, Slot, upsert_slots, get_last_scraped_at
 
 app = FastAPI(title="SlotWatch API")
 
-FRONTEND_ORIGINS="https://najditermin.vercel.app/"
+FRONTEND_ORIGINS="https://vozniski.si/"
 _frontend_origins = os.getenv("FRONTEND_ORIGINS", "")
 ALLOWED_ORIGINS = [o.strip() for o in _frontend_origins.split(",") if o.strip()] or ["*"]
 
