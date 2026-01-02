@@ -1,0 +1,4 @@
+// All material copyright Esri, All Rights Reserved, unless otherwise specified.
+// See https://js.arcgis.com/3.46/esri/copyright.txt for details.
+//>>built
+define("esri/tasks/PrintParameters",["dojo/_base/declare","dojo/_base/lang","dojo/has","../kernel"],function(a,b,c,d){a=a(null,{declaredClass:"esri.tasks.PrintParameters",map:null,template:null,outSpatialReference:null,extraParameters:null});c("extend-esri")&&b.setObject("tasks.PrintParameters",a,d);return a});

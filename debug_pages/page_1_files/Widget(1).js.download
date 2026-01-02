@@ -1,0 +1,1724 @@
+var dplWidget;
+
+function sendToParent(msg) {
+  var urls = dplWidget.getPostMessageUrls();
+  var succ = false;
+  if (urls) {
+    urls.map(postMessageUrl=>{
+      if (postMessageUrl){
+        succ = true;
+        window.parent.postMessage(msg, postMessageUrl);
+      }
+    });
+  }
+  if (!succ) {
+    console.error('Domene krovnih aplikacij v Web Appbuilder aplikaciji niso nastavljene. Spodnje sporočilo ni bilo dostavljeno:');
+    console.error(msg)
+  }
+
+  return false;
+}
+
+function sendExit() {
+  sendToParent({command:'exit', success:true});
+  return false;
+}
+
+function sendId(id) {
+  var msg = {
+    command: 'pointSelection',
+    success: true,
+    featureId: id
+  }
+  sendToParent(msg);
+  return false;
+}
+
+function redirectParent(baseUrl, id) {
+  window.top.location.href = baseUrl + id;
+  return false;
+}
+/*error codes
+1: pomanjkljiva konfiguracija
+2: neskladni vhodni parametri
+3: napaka v procesiranju
+4: ni rezultatov
+5: aplikacija je zaposlena
+6: neveljavna uporabnikova akcija
+*/
+function sendError(inMessage, text, ec, ex) {
+  var etext = text + ((ex && ex.message) ? ex.message : '')
+  if (inMessage==null)
+    inMessage = {};
+  var msg = {
+    success: false,
+    errorMessage: etext,
+    errorCode: ec,
+    command: inMessage.command
+  }
+  sendToParent(msg);
+  console.error(msg);
+  if (ex)
+    throw ex;
+}
+function sendSuccess(inMessage, outMessage) {
+  if (outMessage==null)
+    outMessage = {};
+  outMessage.command=inMessage.command;
+  outMessage.success=true;
+  sendToParent(outMessage);
+}
+
+define(["dojo/_base/declare",
+  "dojo/_base/lang",
+  "dojo/on",
+  "dojo/_base/window",
+  "dojo/promise/all",
+  "dojo/dom-construct", 
+  "esri/Color", "esri/dijit/PopupTemplate", "esri/InfoTemplate",
+  "esri/layers/FeatureLayer",
+  "esri/layers/GraphicsLayer",
+  "esri/graphic", "esri/symbols/SimpleFillSymbol", "esri/symbols/SimpleMarkerSymbol", "esri/symbols/SimpleLineSymbol", "esri/renderers/SimpleRenderer",
+  "esri/symbols/PictureMarkerSymbol",
+
+  "esri/SpatialReference",
+  "esri/geometry/Point",
+
+  "esri/geometry/Circle",
+  "esri/geometry/Polyline",
+  "dojo/Deferred",
+  "esri/geometry/geometryEngine",
+  "esri/geometry/projection",
+
+  "esri/tasks/PrintTask", "esri/tasks/PrintParameters", "esri/tasks/PrintTemplate",
+  "esri/tasks/QueryTask", 
+  "esri/tasks/query", "esri/request",
+  "dojo/dom-style", "dijit/TooltipDialog", "dijit/popup",
+  "dojo/i18n!esri/nls/jsapi",
+
+  "esri/dijit/Legend",
+  'dojo/dnd/Moveable',
+
+  "jimu/BaseWidget"
+],
+  function (declare,
+    lang,
+    on,
+    win,
+    all,
+    domConstruct,
+    Color, PopupTemplate, InfoTemplate,
+    FeatureLayer,
+    GraphicsLayer,
+    Graphic, SFS, SMS, SLS, SimpleRenderer,
+    PictureMarkerSymbol,
+
+    SpatialReference,
+    Point,
+    Circle,
+    Polyline,
+    Deferred,
+    geometryEngine,
+    projection,
+
+    PrintTask, PrintParameters, PrintTemplate,
+    QueryTask, 
+    Query, esriRequest,
+    domStyle, TooltipDialog, dijitPopup,
+    bundle,
+
+    Legend,
+    Moveable,
+
+    BaseWidget
+  ) {
+    return declare(BaseWidget, {
+      //wkid: 4326,
+      legendaOverlay: null,
+
+
+
+
+
+
+
+      featHover: null,
+      featOut: null,
+      graphHover: null,
+      graphOut: null,
+      dialog: null,
+      //featureLabel: null,
+      featureCount: 0,
+
+      selectionMode: false,
+      additionMode: false,
+      //selectedFeatures: [],
+      //addedFeatures: [],
+      maxAdditions: -1,
+      maxSelections: -1,
+      lastAdditionId: -1,
+      minRadius: -1,
+      minRadiusLayers: [],
+      returnWkid: null,
+
+      selectionGraphicsLayer: null,
+      additionGraphicsLayer: null,
+      pointCoordinateGraphics: null,
+      locked: false,
+
+      selectionLayerObj: null,
+      selectionSublayer: null,
+      defaultZoomLevel: 18,
+      lastMessageOrigin: null,
+
+      preventIdentify: function(evt){
+        this.map.infoWindow.hide();
+        throw "napaka vržena za blokado identifyja, ignoriraj";
+        //ne rata mi drugace blokirat popupa na klik. kolkor razumem, je problem tole:
+        //dojo.on zeli event objekt populirati z raznimi ekstra podatki, ampak event objekta se ne sme editirat
+        //posledicno dojo raje prekopira eventove atribute in metode v nov objekt in tega passa handlerju kot kao event objekt
+        //ampak evt.preventDefault, stopPropagation, ipd., ki bi jih tu rabil, se morajo klicati v kontekstu originalnega event objekta, tega pa ni vec
+
+        //hecno je, da preventDefault v nekem smislu dela, ampak samo zato, ker vrze uncaught exception, kar sesuje preostanek dojotovega event handlinga
+        //tko da vseeno, ce eksplicitno naredim to lol
+      },
+
+      runFunctionOnLoad: function(ob, func){
+        if (ob.loaded)
+          func();
+        else {
+          on(ob, "load", lang.hitch(this, func));
+        }
+      },
+
+      dummyPromise: function (result){
+        var deferred = new Deferred();
+        deferred.resolve(result);
+        return deferred;
+      },
+
+      parseQueryString: function (query) {
+        var vars = query.split("&");
+        var queryString = {};
+        for (var i = 0; i < vars.length; i++) {
+          var pair = vars[i].split("=");
+          var key = decodeURIComponent(pair[0]);
+          var value = decodeURIComponent(pair[1]);
+          if (value == "true")
+            value = true;
+          if (value == "false")
+            value = false;
+          queryString[key] = value;
+        }
+
+        return queryString;
+      },
+
+
+
+
+      measureDistance: function(p1,p2){
+        var polyline = new Polyline({
+          paths: [[[p1.x, p1.y],
+          [p2.x, p2.y]]],
+          spatialReference: p1.spatialReference
+        });
+
+        if (polyline.spatialReference.isWebMercator())
+          return geometryEngine.geodesicLength(polyline);
+        else
+          return geometryEngine.planarLength(polyline);
+      },
+      findBlockedLayer: function(name){
+        for (var i=0;i<this.minRadiusLayers.length;i++){
+          if (this.minRadiusLayers[i] == '*' || name.replace(/\s+/g,'_').toLowerCase() == this.minRadiusLayers[i].replace(/\s+/g,'_').toLowerCase())
+            return true;
+        }
+        return false;
+      },
+      getWebMercatorPoint: function(point){
+        if (point.spatialReference.wkid==102100)
+          return point
+        return projection.project(point, new SpatialReference(102100))
+      },
+
+      finishInit: function(urlMessage){
+        on(win.global, "message", lang.hitch(this, this.messageListener), false);
+
+        on(this.map.infoWindow,'selection-change', lang.hitch(this, function(evt){ //TODO: merge
+          console.log('selection-change');
+          console.log(evt);
+          this.updateEditButtons();
+          if (this.config.enableMoveIdentify){ //merging
+            this.updateLeftRightButtons();
+            if (this.lastLeft !==null){
+              var iw = this.map.infoWindow.domNode;
+              if (!iw.getElementsByClassName('titleButton restore').length){
+                iw.style.left = this.lastLeft;
+                iw.style.top = this.lastTop;
+              }
+            }
+          }
+        }));
+
+
+        on(this.map.infoWindow,'clear-features', function(evt){
+          console.log('clear-features')
+          console.log(evt);
+          if (this.config.enableMoveIdentify){
+            this.updateLeftRightButtons();
+            this.initWindow();
+          }
+        }.bind(this));
+
+        on(this.map.infoWindow,'set-features', function(evt){
+          console.log('set-features');
+          console.log(evt);
+          if (this.config.enableMoveIdentify){
+            this.updateLeftRightButtons();
+            if (this.config.enableMoveIdentifyMarker && this.lastClickPoint){
+              this.addMarker(this.lastClickPoint);
+            }
+          }
+        }.bind(this));
+
+        on(this.map.infoWindow, 'hide', lang.hitch(this, function(){ //TODO: merge
+          this.map.infoWindow.selectedIndex = -1;
+          this.updateEditButtons();
+          if (this.config.enableMoveIdentify)
+            this._clearMarker(); //merging
+        }));
+
+        on(this.map.infoWindow, 'show', lang.hitch(this, function(){ //TODO: merge
+          this.updateEditButtons();
+          if (this.config.enableMoveIdentify)
+            this.initWindow(); //merging
+        }));
+
+        on(this.map, 'click', lang.hitch(this, function (evt) {
+          if (this.additionMode){
+            if (evt.graphic && 'additionId' in evt.graphic.attributes){
+              this.additionGraphicsLayer.remove(evt.graphic);
+              sendSuccess({command:'removePoint'}, {feature: this.cleanFeature(evt.graphic)});
+            }
+            else {
+              var canAdd = this.maxAdditions==-1 || this.additionGraphicsLayer.graphics.length<this.maxAdditions;
+              if (canAdd && this.minRadius!=-1 && (this.findBlockedLayer('addedPoints'))){
+                for (var i=0;i<this.additionGraphicsLayer.graphics.length;i++){
+                  var dst = this.measureDistance(evt.mapPoint, this.additionGraphicsLayer.graphics[i].geometry);
+                  if (dst<this.minRadius){
+                    canAdd = false;
+                    break;
+                  }
+                }
+              }
+              var promise = this.dummyPromise(canAdd);
+              if (canAdd && this.minRadius!=-1 && this.minRadiusLayers.length>0){
+                var point = this.getWebMercatorPoint(evt.mapPoint);
+                var promiseArr = [];
+                this.getLayerArray().map(lang.hitch(this, function(layer) {
+                  var nameMatch = this.findBlockedLayer(layer.arcgisProps.title);
+                  if (layer.layerInfos==null){
+                    if (nameMatch){
+                      promiseArr.push(this.identify(layer.url, point, this.minRadius, null));
+                    }
+                  }
+                  else {
+                    layer.layerInfos.map(lang.hitch(this, function(layInfo){
+                      if (nameMatch || this.findBlockedLayer(layInfo.name))//SZProgeInTiri - SZ.SZ.proge;VING sloji - VING LINIJE;VING sloji point;VING LINIJE
+                        promiseArr.push(this.identify(layer.url+'/'+layInfo.id, point, this.minRadius, null));
+                    }));
+                  }
+                }));
+                if (promiseArr.length>0){
+                  promise = all(promiseArr).then(lang.hitch(this, function(resultArr){
+                    if (resultArr){
+                      for (var i=0;i<resultArr.length;i++){
+                        if (resultArr[i].features!=null && resultArr[i].features.length>0)
+                          return false;
+                      }
+                    }
+                    return true;
+                  }),
+                  lang.hitch(this, function(error){
+                    sendError({command:'addPoint'}, 'Napaka v dodajanju tocke', 3, error);
+                  })
+                  );
+                }
+              }
+
+              promise.then(lang.hitch(this, function(canAddResult){
+                if (canAddResult){
+                  var tockaMarker = new SMS("circle", 20, new SLS(SLS.STYLE_SOLID, new dojo.Color([192, 0, 0, 0.5]), 7), new Color([255, 255, 255, 0.5]));
+                  this.lastAdditionId += 1;
+                  var tockaGraphic = new Graphic(evt.mapPoint, tockaMarker, {additionId: this.lastAdditionId})
+                  this.additionGraphicsLayer.add(tockaGraphic);
+                  sendSuccess({command:'addPoint'}, {feature: this.cleanFeature(tockaGraphic)});
+                }
+                else{
+                  sendError({command:'addPoint'}, 'Lokacija ni dovoljena: ', 6, null);
+                }
+              }),
+              lang.hitch(this, function(error){
+                sendError({command:'addPoint'}, 'Napaka v dodajanju tocke: ', 3, error);
+              })
+              );
+            }
+            this.preventIdentify(evt);
+            return false;
+          }
+          else if (this.config.enableMoveIdentify && this.config.enableMoveIdentifyMarker){
+            this.lastClickPoint = evt.mapPoint;
+          }
+          if (evt.graphic && ('cluster_id' in evt.graphic.attributes)) {
+            this.preventIdentify(evt);
+            return false;
+          }
+        }));
+        sendToParent({
+          command: 'ready',
+          ready: true,
+          legacyMode: this.config.legacyMode
+        });
+        if (urlMessage)
+          this.handleMessage(urlMessage);
+      },
+
+
+
+
+      startup: function(){
+        dplWidget = this;
+
+        var element = document.createElement('link');
+        element.href = this.amdFolder+'widget.css';
+        element.rel = 'stylesheet';
+        element.type = 'text/css';
+        document.getElementsByTagName('head')[0].appendChild(element);
+
+        
+        var styleSheet = document.createElement('style')
+        styleSheet.innerHTML = ".jimu-widget-onscreen-icon[title='"+this.label+"'] {display:none}";
+        document.body.appendChild(styleSheet)
+
+        var element = document.querySelector(".BoxTheme .jimu-widget[data-widget-name='BoxController']");
+        if (element)
+          element.parentNode.removeChild(element);
+        projection.load();
+        esriRequest.setRequestPreCallback(function (ioArgs) {
+          ioArgs.preventCache = true;
+          return ioArgs;
+        });
+
+        var urlMessage = null;
+
+        if (window.location.search) {
+          urlMessage = this.parseQueryString(window.location.search.substring(1));
+          if (urlMessage==null || !urlMessage.command ||  !this.validateConfigForInput(urlMessage) || !this.validateInput(urlMessage))
+            urlMessage = null;
+        }
+        this.selectionGraphicsLayer = new GraphicsLayer();
+        this.map.addLayer(this.selectionGraphicsLayer, -99999);
+        this.additionGraphicsLayer = new GraphicsLayer();
+        this.map.addLayer(this.additionGraphicsLayer, -99999);
+
+        this.pointCoordinateGraphics = new GraphicsLayer();
+        this.map.addLayer(this.pointCoordinateGraphics, -99999);
+
+
+        bundle.layers.clusters.numFeatures = 'Število točk'
+        bundle.layers.clusters.countSummary = "Ta gruča vsebuje <b>${count}</b> točk."
+
+        if (this.config.enableExit){
+          var a = document.createElement('div')
+          document.body.appendChild(a);
+          if (this.config.legacyMode)
+            a.onclick = 'sendId(-1)'
+          else
+            a.onclick = 'sendExit()'
+          a.className += 'exit-button map-button'
+          a.title = 'Zapri'
+
+          a.innerHTML = '<span>X</span>'
+          a.addEventListener('click', function () { sendId(-1) });
+        }
+
+        this.addButton = document.createElement('div')
+        document.body.appendChild(this.addButton);
+        
+        //this.addButton.onclick = 'sendId(-1)'
+        this.addButton.className += 'map-button hidden'
+        this.addButton.id = 'add-button'
+        this.addButton.title = 'Dodaj v izbor'
+
+        this.addButton.innerHTML = '<span>Dodaj v izbor</span>'
+        this.addButton.addEventListener('click', lang.hitch(this, this.addToSelection));
+        
+        this.removeButton = document.createElement('div')
+        document.body.appendChild(this.removeButton);
+        
+        //this.removeButton.onclick = 'sendId(-1)'
+        this.removeButton.className += 'map-button hidden'
+        this.removeButton.id = 'remove-button'
+        this.removeButton.title = 'Odstrani iz izbora'
+
+        this.removeButton.innerHTML = '<span>Odstrani iz izbora</span>'
+        this.removeButton.addEventListener('click', lang.hitch(this, function(){this.removeFromSelection()}));
+
+        this.selectionContainer = document.createElement('div')
+        document.body.appendChild(this.selectionContainer);
+        
+        //this.removeButton.onclick = 'sendId(-1)'
+        this.selectionContainer.id = 'selection-container'
+
+        this.dialog = new TooltipDialog({
+          id: "tooltipDialog",
+          style: "position: absolute; width: 250px; font: normal normal normal 10pt Helvetica;z-index:107"
+        });
+        this.dialog.startup();
+        this.runFunctionOnLoad(this.map, lang.hitch(this, function(){
+          if (this.config.enableMoveIdentify)
+            this.initMoveIdentify();
+          if (this.config.featureLayerAdd){
+            this.initAddedLayer(urlMessage).then(lang.hitch(this, function(){
+              this.runFunctionOnLoad(this.addedFeatureLayer, lang.hitch(this, function(){
+                this.finishInit(urlMessage);
+              }));
+            }),
+            lang.hitch(this, function(error){
+              sendError({command: 'ready', ready: false}, 'Napaka v inicializaciji: ', 3, error);
+            })
+            );
+          }
+          
+          else if (this.config.featureLayerSelect) {
+            for (var layId in this.map._layers) {
+              if (this.map._layers.hasOwnProperty(layId)) {
+                var lay = this.map._layers[layId];
+                if (this.config.featureLayerSelect == lay.url && lay.subLayerIds == null && lay.type == "Feature Layer" && lay.fields != null) {
+                  this.selectionLayerObj = lay;
+                  this.runFunctionOnLoad(lay, lang.hitch(this, function(){
+                    this.finishInit(urlMessage);
+                  }));
+                  return;
+                }
+              
+                if (lay.tileInfo != null || lay.layerInfos == null)
+                  continue;
+                for (var j = 0; j < lay.layerInfos.length; j++) {
+                  var layUrl = (lay.url+'/'+lay.layerInfos[j].id).toLowerCase().replace(/\/$/, "");
+                  if (layUrl == this.config.featureLayerSelect.toLowerCase().replace(/\/$/, "")) {
+                    this.selectionLayerObj = lay;
+                    this.selectionSublayer = lay.layerInfos[j].id;
+                    this.runFunctionOnLoad(lay, lang.hitch(this, function(){
+                      this.finishInit(urlMessage);
+                    }));
+
+                    return;
+                  }
+                }
+              }
+            }
+            sendError({command: 'ready', ready: false}, 'Napaka v inicializaciji: sloj '+this.config.featureLayerSelect+' ni bil najden na karti.', 3);
+          }
+          else{
+            this.finishInit(urlMessage);
+          }
+        }));
+      },
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+      initAddedLayer: function (message) {
+        var url = this.config.featureLayerAdd;
+        var where = this.getWhere(message);
+        
+        var deferred;
+        if (this.config.legacyMode)
+          deferred = this.dummyPromise(this.getPopupLegacy(message));
+        else{
+          deferred = esriRequest({
+            url: url,
+            content: { f: "json" },
+            handleAs: "json",
+            callbackParamName: "callback"
+          }).then(function(response) {
+            var fieldInfos = response.fields.map(function(field) {
+              return {
+                fieldName: field.name,
+                label: field.alias,
+                visible: true
+              };
+            });
+            return new PopupTemplate({
+                title: '',
+                fieldInfos: fieldInfos
+            });
+          },
+          lang.hitch(this, function(error){
+            sendError(message, 'Napaka v inicializaciji sloja: ', 3, error);
+          }));
+        }
+
+        return deferred.then(lang.hitch(this, function(popupTemplate){
+          var configObj = {
+            "id": "points",
+            "definitionExpression": where ? where : '1=0', // new PopupTemplate({ title: '', description: '' }),
+            "outFields": ['*'],
+            "mode": FeatureLayer.MODE_SNAPSHOT,
+            "infoTemplate" : popupTemplate
+          }
+          if (this.config.legacyMode && !this.config.disableClustering){
+            configObj.featureReduction = {
+              type: "cluster",
+              clusterRadius: 60
+            }
+          }
+          this.addedFeatureLayer = new FeatureLayer(url, configObj);
+          if (this.config.legacyMode){
+            this.addedFeatureLayer.setRenderer(new SimpleRenderer(
+              new SMS("circle", 12, new SLS(SLS.STYLE_SOLID, new dojo.Color([0, 0, 0, 0.25]), 5), new Color([0, 0, 0, 0.5]))
+            ));
+          }
+          this.map.addLayer(this.addedFeatureLayer);
+  
+          if (this.config.legacyMode && !this.config.disableClustering){
+            legendaOverlay = document.createElement('div')
+            legendaOverlay.id = 'legend-overlay-div';
+            document.body.append(legendaOverlay);
+            this.addedFeatureLayer.on('load', lang.hitch(this, function () {
+              var l = document.createElement('div')
+              legendaOverlay.append(l);
+              l.id = 'legend-div';
+    
+              var legend = new Legend({
+                map: this.map,
+                layerInfos: [{
+                  layer: this.addedFeatureLayer,
+                  title: "Števila točk"
+                }]
+              }, "legend-div");
+              legend.startup();
+            }))
+          }
+  
+          // if (this.config.legacyMode){
+          // }
+          this.attachInfoWindowHover();
+          on(this.addedFeatureLayer, 'click', lang.hitch(this, this.hidePopup));
+          on(this.pointCoordinateGraphics, 'click', lang.hitch(this, this.hidePopup));
+          on(this.map, 'zoom', lang.hitch(this, this.hidePopup));
+          return true;
+        }),
+        lang.hitch(this, function(error){
+          sendError(message, 'Napaka v inicializaciji sloja: ', 3, error);
+        }));
+      },
+
+      handleMessage: function(message){
+        try{
+          if (this.locked)
+            sendError(message, 'Aplikacija je zaposlena', 5);
+          else if (this.validateConfigForInput(message) && this.validateInput(message)){
+            if (this.config.legacyMode)
+              this.handleLegacyMessage(message);
+
+            else if (message.command == 'displayPoint')
+              this.handleDisplayPointMessage(message);
+            else if (message.command == 'hidePoint')
+              this.handleHidePointMessage(message);
+            else if (message.command == 'displayFeaturesFromService')
+              this.handleDisplayFeaturesFromServiceMessage(message);
+            
+            else if (message.command == 'startSelection')
+              this.handleStartSelectionMessage(message);
+            
+            else if (message.command == 'endSelection')
+              this.handleEndSelectionMessage(message);
+            
+            else if (message.command == 'startAddition')
+              this.handleStartAdditionMessage(message);
+            
+            else if (message.command == 'endAddition')
+              this.handleEndAdditionMessage(message);
+            
+            else if (message.command == 'identify')
+              this.handleIdentifyMessage(message);
+            
+            else if (message.command == 'locate')
+              this.handleLocateMessage(message);
+            
+            else if (message.command == 'screenshot')
+              this.handleScreenshotMessage(message);
+          }
+        }
+        catch (ex) {
+          sendError(message, 'Napaka v procesiranju: ', 3, ex);
+          throw ex;
+        }
+      },
+
+      getPostMessageUrls: function(){
+        if (this.lastMessageOrigin)
+          return [this.lastMessageOrigin];
+        else if (this.config.postMessageUrls)
+          return this.config.postMessageUrls;
+        else{
+          console.warn('Konfiguracija orodja Display Geo Objects je zastarela, prosimo odprite konfiguracijo v web appbuilder aplikaciji in popravite seznam URLjev krovne aplikacije')
+          return [this.config.postMessageUrl];
+        }
+      },
+
+      messageListener: function (ev) {
+        //if (ev.origin != this.config.callerOrigin)
+          if (ev.data && ev.source !== window && (
+            (this.config.postMessageUrls && (this.config.postMessageUrls.find(url=>url=='*') || this.config.postMessageUrls.find(url=>ev.origin.toUpperCase()==url.toUpperCase())))
+              ||
+            (this.config.postMessageUrl && (this.config.postMessageUrl == '*' || this.config.postMessageUrl.toUpperCase() == ev.origin.toUpperCase()))
+            )
+          ) {
+            this.lastMessageOrigin = ev.origin;
+            this.handleMessage(ev.data);
+          }
+      },
+
+      tryParseFloat: function (maybeFloat) {
+        try {
+          return !isNaN(parseFloat(maybeFloat));
+        }
+        catch (ex) {
+          return false;
+        }
+      },
+      tryParseInt: function (maybeInt) {
+        try {
+          return !isNaN(parseInt(maybeInt));
+        }
+        catch (ex) {
+          return false;
+        }
+      },
+
+      validateConfigForInput: function(message){
+        var errors = [];
+        if (this.config.legacyMode){
+          if ('pointX' in message || 'pointY' in message){
+            
+          }
+          else{
+            if (!this.config.featureLayerSelect && !this.config.featureLayerAdd){
+              errors.push('Sloj ni nastavljen');
+            }
+            if (!this.config.idField && (!('where' in message) || 'baseUrl' in message || 'returnId' in message)){
+              errors.push('ID polje ni nastavljeno');
+            }
+            if (!this.config.displayField){
+              errors.push('Polje z nazivom ni nastavljeno');
+            }
+          }
+        }
+
+        if (message.command == 'displayFeaturesFromService'){
+          if (!this.config.featureLayerSelect && !this.config.featureLayerAdd){
+            errors.push('Sloj ni nastavljen');
+          }
+          if (!this.config.idField && !('where' in message)){
+            errors.push('ID polje ni nastavljeno');
+          }
+        }
+
+        if (message.command == 'startSelection' || message.command == 'endSelection'){
+          if (!this.config.featureLayerSelect && !this.config.featureLayerAdd){
+            errors.push('Sloj ni nastavljen');
+          }
+          else{
+            if (!this.config.idField){
+              errors.push('ID polje ni nastavljeno');
+            }
+            if (!this.config.displayField){
+              errors.push('Polje z nazivom ni nastavljeno');
+            }
+          }
+        }
+
+        if (message.command == 'locate'){
+          var wgts = this.widgetManager.getWidgetsByName('Search');
+          if (wgts.length == 0){
+            errors.push('Iskalec ni dodan v web app');
+          }
+        }
+        if (message.command == 'screenshot'){
+          if (!this.config.printServiceUrl){
+            errors.push('URL print servisa ni nastavljen');
+          }
+        }
+
+        if (errors.length) {
+          sendError(message, 'Nepravilna konfiguracija aplikacije za dano zahtevo: \n' + errors.join('\n'), 1);
+          return false;
+        }
+        else {
+          return true;
+        }
+      },
+
+      validateInput: function (message) {
+        var errors = [];
+        var requiredParams = ['command'];
+        var isLegacyDisplayPoint = false;
+        if (this.config.legacyMode) {
+          if ('pointX' in message || 'pointY' in message || 'wkid' in message)
+            isLegacyDisplayPoint = true;
+          requiredParams = [];
+        }
+
+        if (message.command == 'displayFeaturesFromService' || (this.config.legacyMode && !isLegacyDisplayPoint)){
+          var fid = 'featureId' in message;
+          var lst = 'idList' in message;
+          var wh = 'where' in message;
+
+          //if (('pointX' in message && 'pointY' in message && ('featureId' in message || 'idList' in message)) || ('featureId' in message && 'idList' in message))
+          if (fid + lst + wh == 0)
+            errors.push('Zahtevek ne vsebuje nobenega podatka za prikaz.');
+          if ((fid + lst + wh) > 1)
+            errors.push('Zahtevek vsebuje več kot enega od teh podatkov naenkrat: featureId, idList, where pogoj.');
+          if (message.baseURL && message.returnId)
+            errors.push('Zahtevek vsebuje baseURL in returnId parameter hkrati.');
+          if (message.baseURL && message.returnId)
+            errors.push('Zahtevek vsebuje baseURL in returnId parameter hkrati.');
+        }
+
+        else if (message.command == 'displayPoint' || message.command == 'identify' || (this.config.legacyMode && isLegacyDisplayPoint)){
+          requiredParams.push('pointX');
+          requiredParams.push('pointY');
+          requiredParams.push('wkid');
+          if (message.command == 'displayPoint' || (this.config.legacyMode && isLegacyDisplayPoint))
+            requiredParams.push('featureLabel');
+        }
+        else if (message.command == 'hidePoint'){
+
+        }
+
+        else if (message.command == 'startSelection'){
+
+        }
+        else if (message.command == 'endSelection'){
+
+        }
+        
+        else if (message.command == 'startAddition'){
+          var radiusDefined = ('minRadius' in message && message.minRadius!="" && message.minRadius!=-1);
+          var layersDefined = message.minRadiusLayers && message.minRadiusLayers.length>0;
+          if (radiusDefined != layersDefined) {
+            errors.push('Za omejitev lokacije dodanih točk morata biti vnešena minRadius in minRadiusLayers.');
+          }
+          if (message.minRadiusLayers && !message.minRadiusLayers.every(i => (typeof i === "string")))
+            errors.push('minRadiusLayers mora biti string array')
+        }
+        else if (message.command == 'endAddition'){
+
+        }
+
+        else if (message.command == 'locate'){
+          requiredParams.push('address');
+        }
+        else if (message.command == 'screenshot'){
+
+        }
+        else if ('command' in message){
+          errors.push('Komanda '+message.command+' ni znana.')
+        }
+
+        requiredParams.map(function(att){
+          if (!(att in message) || message[att] == null || message[att]=='')
+            errors.push('Zahtevek ne vsebuje '+att);
+        });
+
+        if (errors.length) {
+          sendError(message, 'Neskladni vhodni parametri: \n' + errors.join('\n'), 2);
+          return false;
+        }
+        else {
+          return true;
+        }
+      },
+
+      getWhere: function (message) {
+        var where = null;
+        if (message !=null){
+          if ('where' in message)
+            where = message.where
+          else if ('idList' in message) {
+            var text = message['idList']
+            if (Array.isArray(text))
+              text = text.join(',')
+            where = this.config.idField + ' IN (' + text + ')';
+          }
+          else if ('featureId' in message) {
+            where = this.config.idField + ' = ' + message.featureId;
+          }
+        }
+        return where;
+      },
+
+      addPointLegacy: function(message, geom){
+        //var geom = new Point(parseFloat(message.pointX), parseFloat(message.pointY), spRef);
+        var infoTemplate = new PopupTemplate({ 'title': '', 'description': message.featureLabel });
+        var tockaMarker = new SMS("circle", 20, new SLS(SLS.STYLE_SOLID, new dojo.Color([192, 0, 0, 0.5]), 7), new Color([255, 255, 255, 0.5]))
+        var tockaGraphic = new Graphic(geom, tockaMarker, {}, infoTemplate)
+        this.pointCoordinateGraphics.add(tockaGraphic);
+
+        this.map.centerAndZoom(geom, this.defaultZoomLevel).then(lang.hitch(this, function(){
+          this.map.infoWindow.setTitle('&nbsp;');
+          this.map.infoWindow.setContent(this.getPopupContentLegacy(message, tockaGraphic.attributes));
+          this.map.infoWindow.show(geom, geom);
+        }),
+        lang.hitch(this, function(error){
+          sendError(message, 'Napaka v dodajanju točke: ', 3, error);
+        }));
+        this.featureCount = 1;
+        if (!this.config.legacyMode)
+          sendSuccess(message);
+      },
+
+      showFeaturePopup: function(geometry, features){
+        var zoomPromise = null;
+        var point = geometry;
+        if (geometry.type=='point'){
+          zoomPromise = this.map.centerAndZoom(geometry, this.defaultZoomLevel);
+        }
+        else {
+          var extent = geometry.getExtent();
+          point = extent.getCenter();
+          if (extent.getWidth()==0 && extent.getHeight()==0){
+            zoomPromise = this.map.centerAndZoom(point, this.defaultZoomLevel);
+          }
+          else{
+            zoomPromise = this.map.setExtent(extent.expand(1.3));
+          }
+        }          
+        zoomPromise.then(lang.hitch(this, function(){
+          var infoTemplate = null;
+          if (features.length>0){
+            if (features[0].infoTemplate)
+              infoTemplate = features[0].infoTemplate
+            else if (features[0]._layer && features[0]._layer.infoTemplate){
+              infoTemplate = features[0]._layer.infoTemplate;
+            }
+          }
+          if (features.length==0 ||infoTemplate!=null){
+            this.map.infoWindow.show(point, point);
+            if (features.length>0)
+              this.map.infoWindow.setFeatures(features);
+            else
+              this.map.infoWindow.clearFeatures();//1608000 //5791000  
+            if (infoTemplate!=null)
+              this.setPopupTemplate(infoTemplate, features[0]);
+          }
+          this.updateEditButtons();
+        }),
+        lang.hitch(this, function(error){
+          sendError({command:"none"}, 'Napaka v prikazu feature popupa ', 3, error);
+        }));
+      },
+
+      setPopupTemplate: function(infoTemplate, ftr){
+        this.map.infoWindow.setTitle('');
+        //this.map.infoWindow.setTitle(infoTemplate.getTitle(ftr));
+        this.map.infoWindow.setContent(infoTemplate.getContent(ftr));
+      },
+
+      identify: function(url, point, radius, infoTemplate){
+        var queryTask = new QueryTask(url);
+        
+        var circle = new Circle({
+          center: point,
+          radius: radius,
+          radiusUnit: "esriMeters"
+        });
+
+
+        var query = new Query();
+        query.where = "1=1";
+        query.returnGeometry = true;
+        query.geometryType="esriGeometryPolygon"
+        
+
+        query.geometry = circle; //.getExtent();
+        query.outSpatialReference = circle.spatialReference;
+        query.outFields = ["*"];
+        return queryTask.execute(query/*, lang.hitch(this, function (response) {
+
+          var nearest = null;
+          var nearestFeat = null;
+          var clickedPoint = null;
+          for (var j = 0; j < response.features.length; j++) {
+            if (clickedPoint == null) {
+              if (response.features[j].geometry.spatialReference.wkid == usedPoint.spatialReference.wkid)
+                clickedPoint = usedPoint;
+              else{
+                 clickedPoint = usedPoint;
+              }
+            }
+
+            var current = geometryEngine.nearestCoordinate(response.features[j].geometry, clickedPoint);
+            if (nearest == null || current.distance < nearest.distance) {
+              nearestFeat = response.features[j].geometry;
+              nearest = current;
+            }
+          }
+          
+          this.showNearest(nearest, usedPoint, nearestFeat);
+        })*/).then(lang.hitch(this, function(response){
+          response.infoTemplate = infoTemplate;
+          response.layerUrl = url;
+          return response;
+        }),
+        lang.hitch(this, function(error){
+          sendError({command:"none"}, 'Napaka v identify queryju ', 3, error);
+        }));
+      },
+
+      getLayerArray: function(){
+        var layerArray = [];
+        for (lay in this.map._layers){
+            if (this.map._layers.hasOwnProperty(lay)){
+              var layer = this.map._layers[lay];
+              if (layer.url!=null && layer.tileInfo==null)
+                layerArray.push(layer);
+            }
+        }
+        return layerArray;
+      },
+
+      cleanFeature: function(ftr){
+        var gm = ftr.geometry;
+        if (this.returnWkid!=null)
+          gm = projection.project(gm, new SpatialReference(this.returnWkid));
+        var result = {attributes:ftr.attributes, geometry: {wkid: gm.spatialReference.wkid}};
+
+        var copyProps = ['paths','rings','x','y'];
+        copyProps.map(function(prop){
+          if (prop in gm)
+            result.geometry[prop] = gm[prop]
+        });        
+        return result;
+      },
+
+      addToSelection:function(){
+        if (this.selectionMode){
+          if (this.map.infoWindow.selectedIndex!=-1){
+            var ft = this.map.infoWindow.features[this.map.infoWindow.selectedIndex];
+            var symbol = null;
+            if (ft.geometry.type=='polyline')
+              symbol = new SLS(SLS.STYLE_SOLID, new dojo.Color([192, 0, 0, 0.5]), 7);
+            else if (ft.geometry.type == 'point' || ft.geometry.type=='multipoint')
+              symbol = new SMS("circle", 20, new SLS(SLS.STYLE_SOLID, new dojo.Color([192, 0, 0, 0.5]), 7), new Color([255, 255, 255, 0.5]));
+            else if (ft.geometry.type=='polygon')
+              symbol = new SFS(SFS.STYLE_SOLID,  new SLS(SLS.STYLE_SOLID, new dojo.Color([192, 0, 0, 0.5]), 7), new Color([255, 255, 255, 0.5]));
+            
+            var graphic = new Graphic(ft.geometry, symbol, ft.attributes);
+
+            graphic.buttonDomNode = document.createElement('div');
+            graphic.buttonDomNode.classList.add('map-button-pair');
+
+            var selectButton = document.createElement('div');
+            selectButton.classList.add('map-button');
+            selectButton.classList.add('item-button');
+            selectButton.onclick = lang.hitch(this, function(){
+              this.showFeaturePopup(ft.geometry, [ft]);
+            });
+
+            var removeFeatureButton = document.createElement('div');
+            removeFeatureButton.classList.add('map-button');
+            removeFeatureButton.onclick = lang.hitch(this, function(){this.removeFromSelection(ft.attributes[this.config.idField])})
+            
+            var label = document.createElement('div');
+            var labelText = ft.attributes[this.config.displayField];
+            if (!labelText)
+              labelText = ft.attributes[this.config.idField];
+            
+            label.innerHTML = labelText;
+            var removeLabel = document.createElement('div');
+            removeLabel.innerHTML = 'X';
+            
+            selectButton.appendChild(label);
+            removeFeatureButton.appendChild(removeLabel);
+
+            graphic.buttonDomNode.appendChild(selectButton);
+            graphic.buttonDomNode.appendChild(removeFeatureButton);
+
+
+            this.selectionGraphicsLayer.add(graphic);
+
+            this.updateEditButtons();
+            
+            sendSuccess({command:'addToSelection'}, {feature: this.cleanFeature(graphic)});
+          }
+        }
+      },
+      
+      removeFromSelection:function(idToRemove){
+        if (this.selectionMode){
+          if (this.map.infoWindow.selectedIndex!=-1){
+            var ft = this.map.infoWindow.features[this.map.infoWindow.selectedIndex];
+            if (idToRemove==null){
+              idToRemove = ft.attributes[this.config.idField];
+            }
+          }
+          var selectionToRemove=null;
+          for (var i=0;i < this.selectionGraphicsLayer.graphics.length;i++){
+            var ft2 = this.selectionGraphicsLayer.graphics[i];
+            if (ft2.attributes[this.config.idField]==idToRemove){
+              selectionToRemove = ft2;
+              break;
+            }
+          }
+          if (selectionToRemove){
+            this.selectionGraphicsLayer.remove(selectionToRemove);
+            sendSuccess({command:'removeFromSelection'}, {feature: this.cleanFeature(selectionToRemove)});
+            this.updateEditButtons();
+          }
+        }
+      },
+
+      removeEditButtons: function(){
+        this.addButton.classList.add('hidden');
+        this.removeButton.classList.add('hidden');
+        this.selectionContainer.innerHTML = '';
+      },
+
+      updateEditButtons: function(){
+        this.removeEditButtons();
+        if (this.selectionMode) {
+          if (this.map.infoWindow.selectedIndex!=-1){
+            var ft = this.map.infoWindow.features[this.map.infoWindow.selectedIndex];
+            var needsButtons = false;
+            if (this.addedFeatureLayer){
+              if (ft._layer == this.addedFeatureLayer)
+                needsButtons = true;
+            }
+            else {
+              var ftUrl = null;
+              if (ft.layerUrl)
+                ftUrl = ft.layerUrl;
+              else if (ft._graphicsLayer)
+                ftUrl = ft._graphicsLayer.url;
+              else if (ft._layer)
+                ftUrl = ft._layer.url;
+              needsButtons = ftUrl!=null && (ftUrl == this.config.featureLayerSelect || ftUrl == this.config.featureLayerAdd);
+            }
+
+            if (needsButtons) {
+              var found = false;
+              for (var i=0; i < this.selectionGraphicsLayer.graphics.length;i++){
+                var ft2 = this.selectionGraphicsLayer.graphics[i];
+                if (ft.attributes[this.config.idField]==ft2.attributes[this.config.idField])
+                {
+                  found = true;
+                  break;
+                }
+              }
+              if (found)
+                this.removeButton.classList.remove('hidden');
+              else if (this.maxSelections == -1 || this.selectionGraphicsLayer.graphics.length <this.maxSelections)
+                this.addButton.classList.remove('hidden');
+            }
+          }
+          
+          for (var i=0;i<this.selectionGraphicsLayer.graphics.length;i++){
+            var ft = this.selectionGraphicsLayer.graphics[i];
+            this.selectionContainer.append(ft.buttonDomNode);
+          }
+        }
+      },
+
+      handleScreenshotMessage: function(message) {
+        //this.config.printServiceUrl = 'http://int106.gdilj.local/arcgis/rest/services/Utilities/PrintingTools/GPServer/Export%20Web%20Map%20Task';
+
+        var printTask = new PrintTask(this.config.printServiceUrl);
+
+
+        var sizeFactor = 1;
+        if (this.config.printWidth)
+          sizeFactor = parseInt(this.config.printWidth)/this.map.width;
+
+        var template = new PrintTemplate();
+        template.exportOptions = {
+          width: this.map.width*sizeFactor,
+          height: this.map.height*sizeFactor,
+          dpi: 96*sizeFactor
+        };
+        template.format = "PNG32";
+        template.layout = "MAP_ONLY";
+        //template.preserveScale = false;
+        template.showAttribution = false;
+
+        var params = new PrintParameters();
+        params.template = template;
+        params.map = this.map;
+        this.locked = true;
+        domConstruct.place('<div id="dim-screen"><div id="dim-screen-text">Izdelujem screenshot...<div id="loading-spinner"></div></div></div>', "jimu-layout-manager", "first");
+          
+        printTask.execute(params, lang.hitch(this, function(results){
+          sendSuccess(message, results);
+          this.locked = false;
+          domConstruct.destroy("dim-screen");
+        }), lang.hitch(this, function(error){
+          this.locked = false;
+          domConstruct.destroy("dim-screen");
+          sendError(message, 'Napaka v printu ', 3, error);
+        }));
+      },
+
+      parseWkid: function(wkid){
+        if (this.tryParseInt(wkid))
+          return parseInt(wkid);
+        return null;
+      },
+
+      handleStartSelectionMessage: function(message){
+        this.selectionMode = true;
+        this.additionMode = false;
+        if ('maxFeatures' in message)
+          this.maxSelections = parseInt(message.maxFeatures);
+        if ('returnWkid' in message)
+          this.returnWkid = this.parseWkid(message.returnWkid);
+        if (this.map.infoWindow.isShowing)
+          this.updateEditButtons();
+        sendSuccess(message);
+      },
+      handleStartAdditionMessage: function(message){
+        this.selectionMode = false;
+        this.additionMode = true;
+        this.maxAdditions = -1;
+        this.minRadius = -1;
+        this.minRadiusLayers = [];
+        if ('maxFeatures' in message)
+          this.maxAdditions = parseInt(message.maxFeatures);
+        if ('minRadius' in message)
+          this.minRadius = parseInt(message.minRadius);
+        if ('minRadiusLayers' in message)
+          this.minRadiusLayers = message.minRadiusLayers;
+        if ('returnWkid' in message)
+          this.returnWkid = this.parseWkid(message.returnWkid);
+        this.map.infoWindow.hide();
+        sendSuccess(message);
+      },
+      handleEndSelectionMessage: function(message){
+        this.selectionMode = false;
+        this.removeEditButtons();
+        
+        var outMsg = {features: this.selectionGraphicsLayer.graphics.map(this.cleanFeature)};
+        if (message.clear){
+          this.selectionGraphicsLayer.clear();
+        }
+
+        sendSuccess(message, outMsg);
+      },
+      handleEndAdditionMessage: function(message){
+        this.additionMode = false;
+        var outMsg = {features: this.additionGraphicsLayer.graphics.map(this.cleanFeature)};
+        if (message.clear){
+          this.additionGraphicsLayer.clear();
+        }
+        
+        sendSuccess(message, outMsg);
+      },
+
+      handleLocateMessage: function(message){
+        var wgts = this.widgetManager.getWidgetsByName('Search');
+        
+        searchWgt = wgts[0];
+        searchWgt.searchDijit.set('value', message.address);
+        searchWgt.searchDijit.suggest();
+        searchWgt.searchDijit.focus();
+        foundOne = true;
+        sendSuccess(message);
+      },
+
+      handleIdentifyMessage: function(message) {
+          var radius = 50;
+          if ('radius' in message){
+            radius = parseInt(message.radius);
+          }
+          var geom = this.getWebMercatorPoint(new Point(parseFloat(message.pointX), parseFloat(message.pointY), new SpatialReference(parseInt(message.wkid))));
+          var promiseArr = [];
+          this.getLayerArray().map(lang.hitch(this, function(layer){
+            if (layer.layerInfos==null && layer.infoTemplate!=null)
+              promiseArr.push(this.identify(layer.url, geom, radius, layer.infoTemplate));
+            else{
+              layer.layerInfos.map(lang.hitch(this, function(layInfo){
+                if (layer.infoTemplates!=null && layInfo.id in layer.infoTemplates && layer.infoTemplates[layInfo.id].infoTemplate!=null)
+                  promiseArr.push(this.identify(layer.url+'/'+layInfo.id, geom, radius, layer.infoTemplates[layInfo.id].infoTemplate));
+              }));
+            }
+          }));
+          all(promiseArr).then(lang.hitch(this, function(resultArr){
+            var ftrs = [];
+            resultArr.map(function(results){
+              if (results.features!=null)
+                results.features.map(lang.hitch(this, function(ftr){
+                  ftr.infoTemplate = results.infoTemplate;
+                  ftr.layerUrl = results.layerUrl;
+                  ftrs.push(ftr);
+                }));
+            });
+            this.showFeaturePopup(geom, ftrs);
+            if (ftrs.length>0)
+              sendSuccess(message, {features: ftrs.map(this.cleanFeature)});
+            else
+              sendError(message, 'Ni rezultatov', 4);
+          })).catch(function(error) {
+            sendError(message, 'identify error: ', 3, error);
+          });
+      },
+
+      clearDisplay: function(){
+        this.selectionGraphicsLayer.clear();
+        this.pointCoordinateGraphics.clear();
+        this.featureCount=0;
+      },
+
+      handleLegacyMessage: function (message){
+        if ('pointX' in message && 'pointY' in message && 'featureLabel' in message)
+          this.handleDisplayPointMessage(message);
+        else
+          this.handleDisplayFeaturesFromServiceMessage(message);
+      },
+
+      handleDisplayPointMessage: function (message){
+        this.clearDisplay();
+        if ('wkid' in message){
+          var geom = new Point(parseFloat(message.pointX), parseFloat(message.pointY), new SpatialReference(parseInt(message.wkid)));
+          this.addPointLegacy(message, geom);
+        }
+        else {
+          this.addPointLegacy(message, new Point(parseFloat(message.pointX), parseFloat(message.pointY), this.map.spatialReference));
+        }
+      },
+      handleHidePointMessage: function (message){
+        this.clearDisplay();
+        this.map.infoWindow.hide();
+        sendSuccess(message);
+      },
+
+      handleDisplayFeaturesFromServiceMessage: function (message) {
+        this.clearDisplay();
+        var where = this.getWhere(message);
+        if (where) {
+          var url = null;
+          var template = null;
+          if (this.config.featureLayerSelect){
+            if (this.selectionSublayer!==null){
+              var layerDefs = [];
+              layerDefs[this.selectionSublayer] = where;
+              this.selectionLayerObj.setLayerDefinitions(layerDefs);
+              url = this.selectionLayerObj.url+'/'+this.selectionSublayer;
+              if (this.selectionLayerObj.infoTemplates && this.selectionLayerObj.infoTemplates[this.selectionSublayer])
+                template = this.selectionLayerObj.infoTemplates[this.selectionSublayer].infoTemplate;
+
+              var subVisible = this.selectionLayerObj.visibleLayers;
+              if (!subVisible.some(function(i){return i==this.selectionSublayer;})){
+                subVisible.push(this.selectionSublayer);
+              }
+              this.selectionLayerObj.setVisibleLayers(subVisible);
+            }
+            else{
+              this.selectionLayerObj.setDefinitionExpression(where);
+              url = this.selectionLayerObj.url;
+              template = this.selectionLayerObj.infoTemplate;
+            }
+            this.selectionLayerObj.setVisibility(true);
+          }
+
+
+          if (this.config.featureLayerAdd){
+            url = this.config.featureLayerAdd;
+            if (this.config.legacyMode)
+              this.addedFeatureLayer.setInfoTemplate(this.getPopupLegacy(message));
+
+            if (this.addedFeatureLayer.getDefinitionExpression()!=where)
+              this.addedFeatureLayer.setDefinitionExpression(where);
+            
+            template = this.addedFeatureLayer.infoTemplate;
+            //var query = new Query();
+            //this.addedFeatureLayer.queryFeatures(query)
+          }
+
+          var queryTask = new QueryTask(url);
+  
+          var query = new Query();
+          query.where = where;
+          query.returnGeometry = true;
+          query.outSpatialReference = this.map.spatialReference;
+          query.outFields = ["*"];
+          
+          this.map.infoWindow.hide();
+
+          queryTask.execute(query).then(
+            lang.hitch(this, function (selected) {
+              var extent;
+              this.featureCount = selected.features.length;
+              if (selected.features.length > 1) {
+                if (this.config.legacyMode && !this.config.disableClustering)
+                  legendaOverlay.style.display = 'block';
+                var extent = esri.graphicsExtent(selected.features);
+                this.map.setExtent(extent.expand(1.3));
+                if (!this.config.legacyMode)
+                  sendSuccess(message, {count: selected.features.length});
+              }
+              else if (selected.features.length == 1) {
+                if (this.config.legacyMode && !this.config.disableClustering)
+                  legendaOverlay.style.display = 'none';
+                
+                if (this.config.legacyMode){
+                  this.map.centerAndZoom(selected.features[0].geometry, this.defaultZoomLevel).then(lang.hitch(this, function(){
+                    this.map.infoWindow.setTitle('&nbsp;');
+                    this.map.infoWindow.setContent(this.getPopupContentLegacy(message, selected.features[0].attributes));
+                    this.map.infoWindow.show(selected.features[0].geometry, selected.features[0].geometry);
+                  }));
+                }
+                else{
+                  var feat = selected.features[0];
+                  feat.layerUrl = url;
+                  feat.infoTemplate = template;
+                  this.showFeaturePopup(feat.geometry, selected.features)
+                  sendSuccess(message, {count: 1});
+                }
+              }
+              else {
+                if (this.config.legacyMode && !this.config.disableClustering)
+                  legendaOverlay.style.display = 'none';
+                sendError(message, 'Ni rezultatov', 4);
+              }
+            }),
+            lang.hitch(this, function (error) {
+              sendError(message, 'Query error: ', 3, error);
+              //throw error;
+            })
+          );
+
+        }
+        else{
+          if (this.config.legacyMode && !this.config.disableClustering)
+            legendaOverlay.style.display = 'none'
+          //TODO: ??check that the definitionExpression isn't the same??
+          if (this.addedFeatureLayer && this.addedFeatureLayer.getDefinitionExpression()!='1=0')
+            this.addedFeatureLayer.setDefinitionExpression('1=0');
+        }
+      },
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+      showPopupLegacy: function(evt) {
+        var g = evt.graphic;
+        if (this.featureCount==1 && this.map.infoWindow.isShowing)
+          return;
+        if (this.map.infoWindow.isShowing && this.map.infoWindow.features){
+          for (var i=0;i<this.map.infoWindow.features.length;i++){
+            if (g == this.map.infoWindow.features[i])
+              return;
+          }
+        }
+        var txt = '';
+        
+        if (this.config.displayField && g.attributes[this.config.displayField]){
+          txt = g.attributes[this.config.displayField];
+        }
+        else if (g.attributes.cluster_count){
+          var cc = g.attributes.cluster_count
+          var slo = ' točk.';
+          if (cc==2)
+            slo = ' točki.'
+          if (cc==3 || cc==4)
+            slo = ' točke.'
+          txt = "Ta gruča vsebuje "+g.attributes.cluster_count+slo;
+        }
+        else if (g.infoTemplate && g.infoTemplate.info.description) {
+          txt = g.infoTemplate.info.description;
+        }
+        if (txt){
+          this.dialog.setContent(txt);
+          domStyle.set(this.dialog.domNode, "opacity", 0.85);
+  
+          dijitPopup.open({
+            popup: this.dialog,
+            x: evt.pageX,
+            y: evt.pageY,
+            padding: {x: 5, y: 5}
+          });
+        }
+      },
+
+      getPopupContentLegacy: function (message, attributes) {
+        var id, display, desc, atag;
+
+        if (!attributes) {
+          id = '${' + this.config.idField + '}';
+          display = '${' + this.config.displayField + '}';
+        }
+        else {
+          id = attributes[this.config.idField];
+          display = attributes[this.config.displayField];
+        }
+
+        if (message && 'featureLabel' in message){
+          desc = message.featureLabel;
+        }
+        else {
+          desc = display;
+        }
+
+        if (message){
+          if (message.baseURL || message.returnId) {
+            if (message.baseURL)
+              atag = '<a href="' + message.baseURL + id + '" onclick="return redirectParent(\'' + message.baseURL + '\', ' + id + ')"'
+            else
+              atag = '<a href="#" onclick="sendId(' + id + ')"'
+  
+            if (message.buttonLabel)
+              desc = '<div style="margin-bottom: 10px;">' + desc + '</div>' + atag + ' class="info-template-button"><span>' + message.buttonLabel + '</span></a>'
+            else
+              desc = atag + '>' + desc + '</a>'
+          }
+        }
+
+        desc = '<div style="padding-bottom: 10px;">' + desc + '</div>'
+        return desc;
+      },
+
+      getPopupLegacy: function (message) {
+        this.map.infoWindow.hide()
+        var pt = new PopupTemplate({ 'title': '', 'description': '' })
+
+        pt.setContent(this.getPopupContentLegacy(message))
+        return pt;
+      },
+
+      hidePopup:function(evt) {
+        dijitPopup.close(this.dialog);
+      },
+
+      detachInfoWindowHover: function(){
+        dijitPopup.close(this.dialog);
+        //this.map.infoWindow.selectedIndex = -1;
+        if (this.featHover) this.featHover.remove();
+        if (this.featOut) this.featOut.remove();
+        if (this.graphHover) this.graphHover.remove();
+        if (this.graphOut) this.graphOut.remove();
+      },
+
+      attachInfoWindowHover: function(){
+        this.detachInfoWindowHover();
+        this.featHover = on(this.addedFeatureLayer, "mouse-move", lang.hitch(this, this.showPopupLegacy));
+        this.featOut = on(this.addedFeatureLayer, "mouse-out", lang.hitch(this, this.hidePopup));
+        this.graphHover = on(this.pointCoordinateGraphics, "mouse-move", lang.hitch(this, this.showPopupLegacy));
+        this.graphOut = on(this.pointCoordinateGraphics, "mouse-out", lang.hitch(this, this.hidePopup));
+      },
+
+
+
+
+
+
+
+
+
+
+
+      lastLeft: null,
+      lastTop: null,
+      lastClickPoint: null,
+      hidePointer: function(pointerClass){
+        var children = this.map.infoWindow.domNode.getElementsByClassName(pointerClass);
+        if (children && children.length>0)
+          children[0].classList.add('deactivated');
+      },
+      resetPointer: function(pointerClass){
+        var children = this.map.infoWindow.domNode.getElementsByClassName(pointerClass);
+        if (children && children.length>0)
+          children[0].classList.remove('deactivated');
+      },
+
+      addMarker: function(point){
+        this.arrowLayer.clear();
+        var marker = new PictureMarkerSymbol({
+          url: this.amdFolder+'/images/esriPin16x26.png',
+          height: 19.5,
+          width: 12,
+          xoffset:0,
+          yoffset: 9.5
+          
+        })
+        this.arrowLayer.add(new Graphic(point, marker));
+      },
+
+      updateLeftRightButtons: function(){
+        var prev = document.getElementById('replacement-prev');
+        var next = document.getElementById('replacement-next');
+
+        prev.classList.remove('hidden');
+        next.classList.remove('hidden');
+        if (this.map.infoWindow.selectedIndex<=0)
+          prev.classList.add('hidden');
+        if (this.map.infoWindow.selectedIndex>=this.map.infoWindow.count-1)
+          next.classList.add('hidden');
+      },
+
+
+      select: function(d){
+        this.lastLeft = this.map.infoWindow.domNode.style.left;
+        this.lastTop = this.map.infoWindow.domNode.style.top;
+        this.updateLeftRightButtons();
+        this.resetOnSwitch = true;
+        //TODO: hide infoWindow if this causes flickering
+
+        if (d==-1)
+          this.map.infoWindow.selectPrevious();
+        if (d==1)
+          this.map.infoWindow.selectNext();
+        this.updateEditButtons();
+      },
+
+      initWindow: function(){
+        this.lastLeft = null;
+        this.lastTop = null;
+        this.resetPointer('pointer');
+        this.resetPointer('outerPointer');
+      },
+
+      _clearMarker: function(){
+        if (this.arrowLayer!=null)
+          this.arrowLayer.clear();
+      },
+
+      initMoveIdentify: function () {
+        var iw = this.map.infoWindow.domNode;
+
+        if (this.config.enableMoveIdentifyMarker){
+          this.arrowLayer = new GraphicsLayer();
+          this.map.addLayer(this.arrowLayer, -99999);
+        }
+
+        var handle = iw.getElementsByClassName('title')[0]
+        var move = new Moveable(iw, {
+          handle: handle
+        });
+
+        on(move, 'MoveStart', function(){
+          this.hidePointer('pointer');
+          this.hidePointer('outerPointer');
+        }.bind(this));
+
+        iw.getElementsByClassName('titleButton prev')[0].classList.add('deactivated');
+        iw.getElementsByClassName('titleButton next')[0].classList.add('deactivated');
+
+        var replacementPrev = document.createElement('div');
+        replacementPrev.className = 'titleButton prev';
+        replacementPrev.title = 'Previous feature';
+        replacementPrev.id = 'replacement-prev'
+        var replacementNext = document.createElement('div');
+        replacementNext.className = 'titleButton next';
+        replacementNext.title = 'Next feature';
+        replacementNext.id = 'replacement-next'
+
+        var parent = iw.getElementsByClassName('titlePane')[0];
+        var sibling = iw.getElementsByClassName('titleButton maximize')[0];
+        parent.insertBefore(replacementPrev, sibling);
+        parent.insertBefore(replacementNext, sibling);
+
+        on(replacementPrev, 'click', function(){
+          this.select(-1);
+        }.bind(this));
+        on(replacementNext, 'click', function(){
+          this.select(1);
+        }.bind(this));
+
+        // on(this.map.infoWindow,'selection-change', function(evt){
+
+
+        //   console.log('selection-change');
+        //   console.log(evt);
+        // }.bind(this))
+
+        // if (this.config.enableMoveIdentifyMarker){
+        //   on(this.map.infoWindow, 'hide', function(evt) {
+        //     this.arrowLayer.clear();
+        //     console.log('hide');
+        //     console.log(evt);
+        //   }.bind(this));
+        // }
+
+        on (this.map, 'zoom-end', function(){
+          this.initWindow();
+        }.bind(this));
+        
+        // on(this.map.infoWindow, 'show', function(evt) {
+        //   this.initWindow();
+        //   console.log('show');
+        //   console.log(evt);
+        // }.bind(this));
+      }
+    });
+
+    
+  });
+
+
