@@ -4,11 +4,17 @@ from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy import text
 import os
 import re
+import sys
 import logging
 
 
 
-log = logging.getLogger(__name__)
+log_logger = logging.getLogger(__name__)
+
+def log_stderr(msg: str):
+    """Timestamped log to stderr for cloud visibility."""
+    ts = datetime.utcnow().isoformat()
+    print(f"[{ts}] [STORAGE] {msg}", file=sys.stderr, flush=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -79,13 +85,13 @@ def store_scrape_log(opened: int, updated: int, total: int, success: bool, messa
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_KEY")
     if not url or not key:
-        log.info("Supabase env not set; skipping scrape log")
+        log_stderr("Supabase env not set; skipping scrape log")
         return False
 
     try:
         from supabase import create_client
     except Exception as e:
-        log.warning("Supabase SDK not available; skipping scrape log: %s", e)
+        log_stderr(f"Supabase SDK not available; skipping scrape log: {e}")
         return False
 
     try:
@@ -93,7 +99,7 @@ def store_scrape_log(opened: int, updated: int, total: int, success: bool, messa
         log_scrape_result(sb, opened=opened, updated=updated, total=total, success=success, message=message)
         return True
     except Exception as e:
-        log.warning("Supabase insert failed: %s", e)
+        log_stderr(f"Supabase insert failed: {e}")
         return False
 
 
@@ -108,6 +114,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
     - last_seen_at: set on every scrape when slot is present
     - available: True iff present in the *latest* scrape
     """
+    log_stderr(f"START upsert_slots items={len(items)}")
     now = datetime.utcnow()
     scrape_ts = now
     opened = updated = 0
@@ -246,13 +253,15 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                     pass
 
         ses.commit()
-
+    
+    log_stderr(f"END upsert_slots opened={opened}, updated={updated}")
     return opened, updated, seen_keys, scrape_ts, new_or_reappeared
 
 
 
 from sqlalchemy import text
 def finalize_scrape(scrape_ts: datetime):
+    log_stderr(f"START finalize_scrape, marking absent slots < {scrape_ts}")
     now = datetime.utcnow()
     stmt = text("""
         UPDATE slot
@@ -266,9 +275,9 @@ def finalize_scrape(scrape_ts: datetime):
     """).bindparams(now=now, scrape_ts=scrape_ts)
 
     with Session(engine) as ses:
-        ses.exec(stmt)   # ← no extra dict
+        res = ses.exec(stmt)   # ← no extra dict
         ses.commit()
-
+        log_stderr(f"END finalize_scrape, rows matched/affected={res.rowcount}") # rowcount is best effort
 
 
 class ScrapeMeta(SQLModel, table=True):
@@ -294,7 +303,7 @@ def log_scrape_result(client, opened: int, updated: int, total: int, success: bo
         }).execute()
     except Exception as e:
         # Fallback logging if Supabase fails
-        print(f"[WARN] Failed to log scrape result to Supabase: {e}")
+        log_stderr(f"[WARN] Failed to log scrape result to Supabase: {e}")
 
 
 
@@ -325,7 +334,7 @@ def _get_supabase_client():
         from supabase import create_client
         return create_client(url, key)
     except Exception as e:
-        log.warning("Supabase SDK not available: %s", e)
+        log_stderr(f"Supabase SDK not available: {e}")
         return None
 
 
@@ -348,9 +357,10 @@ def sync_slots_to_supabase(items: list[dict], scrape_ts: datetime) -> bool:
     Upsert latest view into public.slots_current and append snapshot into public.slots_history.
     Best-effort; logs warning on failure and returns False.
     """
+    log_stderr(f"START sync_slots_to_supabase items={len(items)}")
     sb = _get_supabase_client()
     if not sb:
-        log.info("Supabase env not set or client missing; skipping slot sync")
+        log_stderr("Supabase env not set or client missing; skipping slot sync")
         return False
 
     # Prepare batches (normalize date_iso/time_iso like local storage does)
@@ -392,10 +402,11 @@ def sync_slots_to_supabase(items: list[dict], scrape_ts: datetime) -> bool:
         CHUNK = 1000
         for i in range(0, len(rows_history), CHUNK):
             sb.table("slots_history").insert(rows_history[i:i+CHUNK]).execute()
-
+        
+        log_stderr("END sync_slots_to_supabase success")
         return True
     except Exception as e:
-        log.warning("Supabase slot sync failed: %s", e)
+        log_stderr(f"Supabase slot sync failed: {e}")
         return False
 
 
@@ -405,6 +416,7 @@ def mark_absent_in_supabase(scrape_ts: datetime) -> bool:
     any row not touched in this scrape becomes unavailable.
     Requires last_seen_at to be set to this scrape's ts for present rows.
     """
+    log_stderr("START mark_absent_in_supabase")
     sb = _get_supabase_client()
     if not sb:
         return False
@@ -416,7 +428,9 @@ def mark_absent_in_supabase(scrape_ts: datetime) -> bool:
           .update({"available": False, "places_left": 0, "updated_at": datetime.utcnow().isoformat()}) \
           .lt("last_seen_at", scrape_ts.isoformat()) \
           .execute()
+        
+        log_stderr("END mark_absent_in_supabase success")
         return True
     except Exception as e:
-        log.warning("Supabase finalize mirror failed: %s", e)
+        log_stderr(f"Supabase finalize mirror failed: {e}")
         return False

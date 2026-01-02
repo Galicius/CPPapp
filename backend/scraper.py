@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import time
 import random
 from datetime import datetime, timedelta
@@ -18,6 +19,13 @@ from storage import upsert_slots
 LOCAL_TZ = ZoneInfo("Europe/Ljubljana")
 
 
+def log(msg: str):
+    """Timestamped log to stderr for cloud visibility."""
+    ts = datetime.utcnow().isoformat()
+    # Cloud Run / Functions will capture this as an info/error log
+    print(f"[{ts}] {msg}", file=sys.stderr, flush=True)
+
+
 # -------------------- Config --------------------
 
 BASE = "https://e-uprava.gov.si"
@@ -27,7 +35,7 @@ MAIN = f"{BASE}/si/javne-evidence/prosti-termini-zemljevid.html?lang=si"
 AJAX = f"{BASE}/si/javne-evidence/prosti-termini-zemljevid/content/singleton.html"
 
 MAX_PAGES = 300               # hard safety cap
-MAX_DAYS_AHEAD = 30           # stop when a slot's date is beyond this many days
+MAX_DAYS_AHEAD = 90           # stop when a slot's date is beyond this many days
 REQUEST_PAUSE = (0.6, 1.1)    # random sleep range between pages (seconds)
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
@@ -193,6 +201,11 @@ def _parse_block_node(node) -> Dict:
     date_iso, time_iso = (None, None)
     if date_str and time_str:
         date_iso, time_iso = _parse_iso(date_str, time_str)
+    
+    # Log parsing warnings if essential data is missing
+    if not date_str:
+        # It's possible for there to be rows that aren't slots, but good to know
+        pass 
 
     available = bool((places_left or 0) > 0)
 
@@ -216,6 +229,8 @@ def _parse_block_node(node) -> Dict:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
 def _get(session: httpx.Client, url: str, headers: dict):
+    # Log the attempt
+    log(f"GET {url}")
     r = session.get(url, headers=headers, timeout=30)
     r.raise_for_status()
     return r
@@ -231,6 +246,7 @@ def _extract_blocks(html: str):
     soup = BeautifulSoup(html, "html.parser")
     results = soup.select_one("div#results")
     if not results:
+        log("No div#results found in HTML")
         return []
     out = []
     for tr in results.select("table.responsiveTable tr.js_dogodekBox.js_dicDetailsBtnRow"):
@@ -257,6 +273,8 @@ def fetch_all_pages(
     Crawl paginated AJAX endpoint and return list of slot dicts.
     Stops paginating once we encounter a slot beyond MAX_DAYS_AHEAD.
     """
+    log(f"START fetch_all_pages config: MAX_PAGES={max_pages}, MAX_DAYS_AHEAD={MAX_DAYS_AHEAD}")
+
     default_headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -267,103 +285,147 @@ def fetch_all_pages(
     }
 
     cutoff_date = datetime.now(LOCAL_TZ) + timedelta(days=MAX_DAYS_AHEAD)
+    log(f"Cutoff date: {cutoff_date}")
 
-    with httpx.Client(follow_redirects=True, headers=default_headers) as s:
-        # Warmup for cookies
-        warm = s.get(MAIN, timeout=20)
-        if DEBUG:
-            print(f"[warmup] {warm.status_code} cookies={s.cookies}")
+    try:
+        with httpx.Client(follow_redirects=True, headers=default_headers) as s:
+            # Warmup for cookies
+            log(f"Warmup GET {MAIN}")
+            try:
+                warm = s.get(MAIN, timeout=20)
+                log(f"Warmup status: {warm.status_code}, cookies: {list(s.cookies.keys())}")
+            except Exception as e:
+                log(f"Warmup failed: {e}")
+                # Don't crash, try to proceed? 
+                pass
 
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "text/html, */*;q=0.1",
-            "Referer": MAIN,
-        }
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "text/html, */*;q=0.1",
+                "Referer": MAIN,
+            }
 
-        base = dict(
-            lang="si",
-            type=type_,
-            cat=category,
-            izpitniCenter=izpitni_center,
-            lokacija=lokacija,
-            offset=0,
-            sentinel_type="ok",
-            sentinel_status="ok",
-            is_ajax=1,
-            complete="false",
-        )
+            base = dict(
+                lang="si",
+                type=type_,
+                cat=category,
+                izpitniCenter=izpitni_center,
+                lokacija=lokacija,
+                offset=0,
+                sentinel_type="ok",
+                sentinel_status="ok",
+                is_ajax=1,
+                complete="false",
+            )
 
-        all_items: List[Dict] = []
-        seen = set()
-        last_len = None
+            all_items: List[Dict] = []
+            seen = set()
+            last_len = None
 
-        for page in range(0, max_pages):
-            # singleton works with page=0, keep explicit
-            params = {**base, "page": page}
-            url = f"{AJAX}?{urlencode(params)}"
-            resp = _get(s, url, headers)
-            html = resp.text
-
-            human_page = f"page {page}"
-            if DEBUG and page <= 1:
-                with open(os.path.join(OUTDIR, f"page_{page}.html"), "w", encoding="utf-8") as f:
-                    f.write(html)
-
-            if not html or (last_len is not None and len(html) == last_len and len(html) < 100):
-                break
-            last_len = len(html)
-
-            blocks = _extract_blocks(html)
-            if DEBUG:
-                print(f"[{human_page}] blocks detected: {len(blocks)}")
-
-            page_new = 0
-            stop_due_to_cutoff = False
-
-            for node in blocks:
-                info = _parse_block_node(node)
-                date = info["date_str"]
-                time_str = info["time_str"]
-
-                # require at least date+time
-                if not (date and time_str):
-                    continue
-
-                # cutoff
+            for page in range(0, max_pages):
+                log(f"Fetching page {page}")
+                
+                # singleton works with page=0, keep explicit
+                params = {**base, "page": page}
+                url = f"{AJAX}?{urlencode(params)}"
+                
                 try:
-                    dt = datetime.strptime(date.strip(), "%d. %m. %Y")
-                    dt = _localize(dt)
-                    if dt > cutoff_date:
-                        if DEBUG:
-                            print(f"[cutoff] hit {date} (> {cutoff_date.date()}), stopping.")
-                        stop_due_to_cutoff = True
-                        break
-                except ValueError:
-                    if DEBUG:
-                        print(f"[warn] could not parse date: {date!r}")
+                    resp = _get(s, url, headers)
+                except Exception as ex:
+                    log(f"Network error on page {page}: {ex}")
+                    # If network fails repeatedly, we likely stop
+                    break
 
-                # de-dup key
-                key = (
-                    info["date_str"],
-                    info["time_str"],
-                    info.get("obmocje"),
-                    (info.get("town") or "").strip().lower(),
-                    info.get("categories", ""),
-                )
-                if key in seen:
-                    continue
-                seen.add(key)
+                html = resp.text
+                
+                if DEBUG and page <= 1:
+                    with open(os.path.join(OUTDIR, f"page_{page}.html"), "w", encoding="utf-8") as f:
+                        f.write(html)
 
-                # enrich and map to the DB shape you posted
-                item = dict(info)  # includes date_iso, time_iso, available, location
-                item["source_page"] = page
+                # Check for empty response or identical response
+                if not html:
+                    log(f"Empty HTML on page {page}, breaking.")
+                    break
+                
+                if last_len is not None and len(html) == last_len:
+                    # heuristic: if exact same length, likely same content or empty wrapper
+                    if len(html) < 200: # Threshold for "empty" wrapper
+                         log(f"Page {page} len={len(html)} same as prev (small), assuming end.")
+                         break
+                    else:
+                        # Log warning in case multiple pages have same size by coincidence
+                        log(f"Page {page} len={len(html)} matches previous. Continuing but suspicious.")
+                        pass
 
-                all_items.append(item)
-                page_new += 1
+                last_len = len(html)
 
-            if stop_due_to_cutoff:
-                break
+                blocks = _extract_blocks(html)
+                if not blocks:
+                     # sometimes page 1 has no blocks if really empty, but if page 0 had blocks and this doesn't...
+                     log(f"No blocks found on page {page}.")
+                     pass
 
-            time.sleep(random.uniform(*REQUEST_PAUSE))
+                if DEBUG:
+                    print(f"[{page}] blocks detected: {len(blocks)}")
 
-        return all_items
+                page_new = 0
+                stop_due_to_cutoff = False
+
+                for node in blocks:
+                    info = _parse_block_node(node)
+                    date = info["date_str"]
+                    time_str = info["time_str"]
+
+                    # require at least date+time
+                    if not (date and time_str):
+                        log(f"Skipping block without date/time. Raw: {info}")
+                        continue
+
+                    # cutoff
+                    try:
+                        dt = datetime.strptime(date.strip(), "%d. %m. %Y")
+                        dt = _localize(dt)
+                        if dt > cutoff_date:
+                            log(f"[cutoff] hit {date} (> {cutoff_date.date()}), stopping.")
+                            stop_due_to_cutoff = True
+                            break
+                    except ValueError:
+                         log(f"[warn] could not parse date: {date!r}")
+
+                    # de-dup key
+                    key = (
+                        info["date_str"],
+                        info["time_str"],
+                        info.get("obmocje"),
+                        (info.get("town") or "").strip().lower(),
+                        info.get("categories", ""),
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    # enrich and map to the DB shape you posted
+                    item = dict(info)  # includes date_iso, time_iso, available, location
+                    item["source_page"] = page
+
+                    all_items.append(item)
+                    page_new += 1
+
+                log(f"Page {page}: found {len(blocks)} blocks, {page_new} new items.")
+
+                if stop_due_to_cutoff:
+                    break
+                
+                # Heuristic: if valid page but 0 new items? Could be end of list but not empty HTML.
+                if page > 0 and len(blocks) == 0:
+                    log(f"Page {page} has 0 blocks, assuming end of pagination.")
+                    break
+
+                time.sleep(random.uniform(*REQUEST_PAUSE))
+            
+            log(f"END fetch_all_pages. Total items: {len(all_items)}")
+            return all_items
+
+    except Exception as e:
+        log(f"CRITICAL in fetch_all_pages: {e}")
+        raise e
