@@ -36,72 +36,157 @@ def _resend_send(to: List[str] | str, subject: str, html: str, text: Optional[st
     except Exception:
         return False
 
+# Styles
+FONT_MAIN = "font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;"
+BG_DARK = "#020617"     # slate-950
+BG_CARD = "#1e293b"     # slate-800
+TEXT_WHITE = "#ffffff"
+TEXT_GRAY = "#94a3b8"   # slate-400
+ACCENT = "#3b82f6"      # blue-500
+BORDER = "#334155"      # slate-700
+
 def _fmt_bool_si(b: bool) -> str:
     return "da" if b else "ne"
 
-def _slot_line(it: Dict[str, Any]) -> str:
-    # one-line plain text summary per slot
+def _slot_text_line(it: Dict[str, Any]) -> str:
+    # Keeps plain text version simple
     parts = [
         f"{it['date_str']} ob {it['time_str']}",
         f"{it.get('location') or ''}".strip(),
         f"kat: {it.get('categories') or '-'}",
     ]
     if it.get("exam_type"):
-        parts.append(f"Tip izpita: {it['exam_type']}")
-    if it.get("tolmac") is not None:
-        parts.append(f"tolmač: {_fmt_bool_si(bool(it['tolmac']))}")
+        parts.append(f"Tip: {it['exam_type']}")
     if it.get("places_left") is not None:
         parts.append(f"mesta: {it['places_left']}")
-    return " — ".join([p for p in parts if p])
+    return " | ".join([p for p in parts if p])
+
+def _render_slots_html(items: List[Dict[str, Any]]) -> str:
+    rows = []
+    for it in items:
+        # Data preparation
+        date_time = f"{it['date_str']} <span style='color: {TEXT_GRAY}; font-weight: normal;'>ob</span> {it['time_str']}"
+        loc = it.get('location') or "Neznano"
+        cats = it.get('categories') or "-"
+        exam_type = it.get('exam_type') or ""
+        places = it.get('places_left')
+        
+        meta_parts = []
+        meta_parts.append(f"<span style='color: {ACCENT}; font-weight: bold;'>{cats}</span>")
+        if exam_type:
+            meta_parts.append(f"<span>{exam_type.capitalize()}</span>")
+        if places is not None:
+            meta_parts.append(f"<span>{places} prostih mest</span>")
+        
+        meta_html = " &bull; ".join(meta_parts)
+
+        row = f"""
+        <tr>
+            <td style="padding-bottom: 12px;">
+                <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: {BG_CARD}; border-radius: 8px; border: 1px solid {BORDER};">
+                    <tr>
+                        <td style="padding: 16px;">
+                            <p style="margin: 0 0 4px 0; font-size: 16px; font-weight: bold; color: {TEXT_WHITE};">
+                                {date_time}
+                            </p>
+                            <p style="margin: 0 0 8px 0; font-size: 14px; color: {TEXT_GRAY};">
+                                {loc}
+                            </p>
+                            <p style="margin: 0; font-size: 13px; color: {TEXT_GRAY};">
+                                {meta_html}
+                            </p>
+                        </td>
+                        <td align="right" style="padding: 16px; width: 40px;">
+                             <!-- Arrow icon or similar indicator could go here, keeping it clean for now -->
+                             <span style="font-size: 20px; color: {ACCENT};">&rarr;</span>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+        """
+        rows.append(row)
+    return "\n".join(rows)
 
 def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str, str, str]:
-    # subject
-    label_loc = sub.get("filter_town") or (f"Območje {int(sub['filter_obmocje'])}" if sub.get("filter_obmocje") is not None else "vsi centri")
-    label_cat = sub.get("filter_categories") or "vse kategorije"
-    label_tip = sub.get("filter_exam_type") or "teorija/vožnja"
+    # Labels for context
+    label_loc = sub.get("filter_town") or (f"Območje {int(sub['filter_obmocje'])}" if sub.get("filter_obmocje") is not None else "Vsa območja")
+    label_cat = sub.get("filter_categories") or "Vse kategorije"
+    label_tip = sub.get("filter_exam_type") or "Vsi tipi"
+    
     n = len(items)
-    subject = f"Novi termini ({n}) za filter: {label_loc}, {label_cat}, {label_tip}"
+    subject = f"Novi termini ({n}) - {label_loc}"
 
-    # plain text
-    lines = []
-    lines.append("Pozdravljeni,")
-    lines.append("")
-    lines.append("Na voljo so novi termini, ki ustrezajo vašim nastavitvam:")
-    crit = []
-    if sub.get("filter_obmocje") is not None:
-        crit.append(f"Območje {int(sub['filter_obmocje'])}")
-    if sub.get("filter_town"):
-        crit.append(sub["filter_town"])
-    if sub.get("filter_categories"):
-        crit.append(f"kategorija {sub['filter_categories']}")
-    if sub.get("filter_exam_type"):
-        crit.append(f"tip {sub['filter_exam_type']}")
-    if sub.get("filter_tolmac"):
-        crit.append("tolmač: da")
-    if crit:
-        lines.append(" • " + " • ".join(crit))
-    lines.append("")
+    # Plain text fallback
+    text_lines = ["Pozdravljeni,", "", f"Našli smo {n} novih terminov za vaše kriterije:", ""]
     for it in items:
-        lines.append(" - " + _slot_line(it))
-    lines.append("")
-    unsub = sub.get("unsubscribe_token")
-    if unsub:
-        lines.append(f"Odjava: {FRONTEND_UNSUB_BASE}?token={unsub}")
-    text = "\n".join(lines)
+        text_lines.append(f" - {_slot_text_line(it)}")
+    text_lines.append("")
+    unsub_token = sub.get("unsubscribe_token")
+    if unsub_token:
+        text_lines.append(f"Odjava: {FRONTEND_UNSUB_BASE}?token={unsub_token}")
+    text_lines.append("")
+    text = "\n".join(text_lines)
 
-    # very simple HTML
-    html_lines = []
-    html_lines.append("<p>Pozdravljeni,</p>")
-    html_lines.append("<p>Na voljo so novi termini, ki ustrezajo vašim nastavitvam:</p>")
-    if crit:
-        html_lines.append("<p>" + " • ".join(crit) + "</p>")
-    html_lines.append("<ul>")
-    for it in items:
-        html_lines.append(f"<li>{_slot_line(it)}</li>")
-    html_lines.append("</ul>")
-    if unsub:
-        html_lines.append(f'<p><a href="{FRONTEND_UNSUB_BASE}?token={unsub}">Odjava od obvestil</a></p>')
-    html = "\n".join(html_lines)
+    # HTML Email
+    slots_html = _render_slots_html(items)
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="sl">
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{subject}</title>
+    </head>
+    <body style="{FONT_MAIN} margin: 0; padding: 0; background-color: {BG_DARK}; color: {TEXT_WHITE};">
+        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: {BG_DARK}; width: 100%;">
+            <tr>
+                <td align="center" style="padding: 40px 10px;">
+                    <!-- Container -->
+                    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 600px; width: 100%;">
+                        <!-- Header -->
+                        <tr>
+                            <td align="center" style="padding-bottom: 40px;">
+                                <h1 style="margin: 0; font-size: 28px; font-weight: 800; color: {TEXT_WHITE}; letter-spacing: -0.5px;">
+                                    Vozniski.si
+                                </h1>
+                            </td>
+                        </tr>
+                        <!-- Greeting & Intro -->
+                        <tr>
+                            <td style="padding-bottom: 30px; text-align: center;">
+                                <h2 style="margin: 0 0 10px 0; font-size: 24px; font-weight: bold; color: {TEXT_WHITE};">
+                                    Hitro se prijavi!
+                                </h2>
+                                <p style="margin: 0; font-size: 16px; line-height: 1.5; color: {TEXT_GRAY};">
+                                    Našli smo <strong style="color: {TEXT_WHITE}">{n}</strong> novih terminov, ki ustrezajo vašim željam:
+                                </p>
+                                <p style="margin: 8px 0 0 0; font-size: 14px; font-weight: 500; color: {ACCENT}; text-transform: uppercase; letter-spacing: 0.5px;">
+                                    {label_loc} &bull; {label_cat}
+                                </p>
+                            </td>
+                        </tr>
+                        
+                        <!-- Slots List -->
+                        {slots_html}
+                        
+                        <!-- Footer -->
+                        <tr>
+                            <td style="border-top: 1px solid {BORDER}; padding-top: 20px; text-align: center;">
+                                <p style="font-size: 12px; color: {TEXT_GRAY}; margin: 0 0 10px 0;">
+                                    To sporočilo ste prejeli, ker ste naročeni na obvestila na Vozniski.si.
+                                </p>
+                                {f'<p style="font-size: 12px; margin: 0;"><a href="{FRONTEND_UNSUB_BASE}?token={unsub_token}" style="color: {TEXT_GRAY}; text-decoration: underline;">Odjava od obvestil</a></p>' if unsub_token else ''}
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    """
 
     return subject, text, html
 
@@ -206,7 +291,7 @@ def send_test_email(scrape_stats: dict, changes: List[Dict[str, Any]]) -> bool:
              f" - changes listed below ({min(n_changes, 10)} shown):",
             ]
     for it in changes[:10]:
-        lines.append(" * " + _slot_line(it))
+        lines.append(" * " + _slot_text_line(it))
     text = "\n".join(lines)
     html = "<pre>" + "\n".join(lines) + "</pre>"
     return _resend_send(to, subject, html, text)

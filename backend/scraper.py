@@ -232,6 +232,7 @@ def _get(session: httpx.Client, url: str, headers: dict):
     # Log the attempt
     log(f"GET {url}")
     r = session.get(url, headers=headers, timeout=30)
+    log(f"GET {url} -> status {r.status_code}")
     r.raise_for_status()
     return r
 
@@ -363,6 +364,8 @@ def fetch_all_pages(
                 if not blocks:
                      # sometimes page 1 has no blocks if really empty, but if page 0 had blocks and this doesn't...
                      log(f"No blocks found on page {page}.")
+                     if page == 0:
+                         log(f"dumping html snippet (first 500 chars): {html[:500]}")
                      pass
 
                 if DEBUG:
