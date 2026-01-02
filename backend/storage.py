@@ -109,10 +109,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
     Meaningful change = slot appears or disappears (presence).
     Returns (opened, updated, seen_keys, scrape_ts).
 
-    - created_at: first time we saw the slot
-    - updated_at: only when availability flips (disappears or reappears)
-    - last_seen_at: set on every scrape when slot is present
-    - available: True iff present in the *latest* scrape
+    OPTIMIZED: Batched lookup to avoid N+1 queries.
     """
     log_stderr(f"START upsert_slots items={len(items)}")
     now = datetime.utcnow()
@@ -120,7 +117,53 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
     opened = updated = 0
     seen_keys: set[tuple] = set()
 
+    if not items:
+         return opened, updated, seen_keys, scrape_ts, []
+
+    # Prepare keys for batch lookup
+    # We can fetch all potentially matching slots.
+    # Since we lack a single unique ID, and composite keys are complex to Query via IN clause across multiple columns in standard SQLModel easily...
+    # We will fetch all slots that match the *dates* present in the scrape.
+    # Typically this is a small range of dates (next 45 days).
+    
+    # 1. Collect unique dates from items
+    # Normalize dates first for querying
+    unique_dates = set()
+    for it in items:
+        try:
+             d = datetime.strptime(it["date_str"].strip(), "%d. %m. %Y").date()
+             unique_dates.add(d)
+        except Exception:
+             pass
+    
+    # 2. Batch fetch existing slots
+    # If no valid dates found (weird?), fail back to empty or handle gracefully
+    existing_map = {}
+    
     with Session(engine) as ses:
+        # Fetch all slots for these dates
+        # This assumes date_iso is populated correctly on existing slots.
+        if unique_dates:
+            chunks = list(unique_dates)
+            # Fetch in chunks if too many dates (unlikely for 45 days, but safe)
+            # SQLAlchemy IN clause is fine with a list
+            
+            # Using raw strings or simpler logic if needed, but SQLModel verify:
+            q = select(Slot).where(Slot.date_iso.in_(chunks))
+            existing_rows = ses.exec(q).all()
+            
+            # Index them by the composite key
+            for row in existing_rows:
+                k = (
+                    row.date_str,
+                    row.time_str,
+                    row.obmocje,
+                    (row.town or "").strip().lower() if row.town else None,
+                    row.categories or "",
+                )
+                existing_map[k] = row
+
+        # 3. Process items in memory
         for it in items:
             # derive location if not provided
             if "location" not in it:
@@ -140,20 +183,12 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                 it["date_str"],
                 it["time_str"],
                 it.get("obmocje"),
-                (it.get("town") or None),
+                (it.get("town") or "").strip().lower(),
                 it.get("categories", ""),
             )
             seen_keys.add(key)
 
-            # find existing
-            q = select(Slot).where(
-                Slot.date_str == it["date_str"],
-                Slot.time_str == it["time_str"],
-                Slot.obmocje == it.get("obmocje"),
-                Slot.town == (it.get("town") or None),
-                Slot.categories == it.get("categories", ""),
-            )
-            row = ses.exec(q).first()
+            row = existing_map.get(key)
 
             if row is None:
                 # parse normalized fields (best-effort)
@@ -200,6 +235,8 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                 })
 
                 ses.add(row)
+                # update map so duplicates in same batch use same row object (if any?)
+                existing_map[key] = row 
                 opened += 1
             else:
                 # heartbeat every scrape
@@ -239,18 +276,9 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
                     row.source_page = it["source_page"]
                 if "location" in it:
                     row.location = it["location"]
-
-                # (Optional) re-derive normalized date/time without bumping updated_at
-                try:
-                    _d = datetime.strptime(it["date_str"].strip(), "%d. %m. %Y").date()
-                    row.date_iso = _d
-                except Exception:
-                    pass
-                try:
-                    _t = datetime.strptime((it["time_str"] or "00:00").strip(), "%H:%M").time()
-                    row.time_iso = _t
-                except Exception:
-                    pass
+                
+                # Ensure existing objects are attached if session was fresh (it is)
+                ses.add(row)
 
         ses.commit()
     
@@ -358,10 +386,12 @@ def sync_slots_to_supabase(items: list[dict], scrape_ts: datetime) -> bool:
     Best-effort; logs warning on failure and returns False.
     """
     log_stderr(f"START sync_slots_to_supabase items={len(items)}")
-    sb = _get_supabase_client()
     if not sb:
         log_stderr("Supabase env not set or client missing; skipping slot sync")
         return False
+
+    if not items:
+        return True
 
     # Prepare batches (normalize date_iso/time_iso like local storage does)
     rows_current = []

@@ -67,6 +67,41 @@ def _parse_row_date(tr) -> Optional[str]:
     return m.group(1) if m else s
 
 
+def _parse_iso(date_str: str, time_str: str) -> Tuple[Optional[str], Optional[str]]:
+    # input like "14. 10. 2025" and "8:30"
+    try:
+        d = datetime.strptime(date_str.strip(), "%d. %m. %Y").date()
+        t = datetime.strptime(time_str.strip(), "%H:%M").time()
+        return (d.isoformat(), t.strftime("%H:%M:%S"))
+    except Exception:
+        return (None, None)
+
+
+# -------------------- Town extraction --------------------
+
+def _clean_town(raw: str) -> Optional[str]:
+    if not raw:
+        return None
+
+    obmocje_map = {
+        1: ["Ajdovščina", "Idrija", "Ilirska Bistrica", "Koper", "Nova Gorica",
+            "Postojna", "Sežana", "Tolmin"],
+        2: ["Domžale", "Ig", "Jesenice", "Kranj", "Ljubljana", "Vrhnika"],
+        3: ["Celje", "Laško", "Ločica ob Savinji", "Ravne na Koroškem",
+            "Slovenske Konjice", "Slovenj Gradec", "Šentjur",
+            "Šmarje pri Jelšah", "Trbovlje", "Velenje"],
+        4: ["Brežice", "Črnomelj", "Kočevje", "Krško", "Novo mesto", "Sevnica"],
+        5: ["Maribor", "Murska Sobota", "Ormož", "Ptuj", "Slovenska Bistrica"],
+    }
+
+    low = raw.lower()
+    for _, mesta in obmocje_map.items():
+        for city in mesta:
+            if city.lower() in low:
+                return city
+    return None
+
+
 def _extract_items_linear(html: str) -> List[Dict]:
     """
     Parse the HTML table linearly to associate rows with their most recent date header.
@@ -213,6 +248,19 @@ def _parse_block_node_linear(summary_tr, details_tr, date_str) -> Optional[Dict]
     }
 
 
+
+# -------------------- Networking --------------------
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
+def _get(session: httpx.Client, url: str, headers: dict):
+    # Log the attempt
+    log(f"GET {url}")
+    r = session.get(url, headers=headers, timeout=30)
+    log(f"GET {url} -> status {r.status_code}")
+    r.raise_for_status()
+    return r
+
+
 # -------------------- Main fetcher --------------------
 
 def _localize(dt: datetime) -> datetime:
@@ -314,8 +362,6 @@ def fetch_all_pages(
                         # Log warning in case multiple pages have same size by coincidence
                         log(f"Page {page} len={len(html)} matches previous. Continuing but suspicious.")
                         pass
-
-                last_len = len(html)
 
                 last_len = len(html)
 
