@@ -53,93 +53,86 @@ def _norm_space(s: str) -> str:
 def _text(el) -> str:
     return " ".join(el.get_text(" ", strip=True).split()) if el else ""
 
-# Inherit the date from the nearest previous row that has the calendar cell.
-def _row_date_str(tr) -> Optional[str]:
-    def _from_calendar(t) -> Optional[str]:
-        cal = t.select_one(".calendarBox")
-        if not cal:
-            return None
-        s = cal.get("aria-label") or _text(cal.select_one(".sr-only")) or ""
-        s = s.strip()
-        if not s:
-            return None
-        # Be robust to aria-label like "petek, 24. 10. 2025" — extract the date part.
-        m = re.search(r"\b(\d{1,2}\.\s*\d{1,2}\.\s*\d{4})\b", s)
-        return m.group(1) if m else s
-
-    # Current row
-    s = _from_calendar(tr)
-    if s:
-        return s
-
-    # Walk backwards until a calendar cell is found
-    p = tr.find_previous("tr")
-    while p:
-        s = _from_calendar(p)
-        if s:
-            return s
-        p = p.find_previous("tr")
-    return None
-
-def _compose_location(obmocje: Optional[int], town: Optional[str]) -> Optional[str]:
-    if obmocje is None and not town:
+def _parse_row_date(tr) -> Optional[str]:
+    """Extract date string from a calendar row/cell if present."""
+    cal = tr.select_one(".calendarBox")
+    if not cal:
         return None
-    if obmocje is not None and town:
-        return f"Območje {obmocje} , {town}"
-    if obmocje is not None:
-        return f"Območje {obmocje}"
-    return town
-
-
-def _parse_iso(date_str: str, time_str: str) -> Tuple[Optional[str], Optional[str]]:
-    # input like "14. 10. 2025" and "8:30"
-    try:
-        d = datetime.strptime(date_str.strip(), "%d. %m. %Y").date()
-        t = datetime.strptime(time_str.strip(), "%H:%M").time()
-        return (d.isoformat(), t.strftime("%H:%M:%S"))
-    except Exception:
-        return (None, None)
-
-
-# -------------------- Town extraction --------------------
-
-def _clean_town(raw: str) -> Optional[str]:
-    if not raw:
+    s = cal.get("aria-label") or _text(cal.select_one(".sr-only")) or ""
+    s = s.strip()
+    if not s:
         return None
-
-    obmocje_map = {
-        1: ["Ajdovščina", "Idrija", "Ilirska Bistrica", "Koper", "Nova Gorica",
-            "Postojna", "Sežana", "Tolmin"],
-        2: ["Domžale", "Ig", "Jesenice", "Kranj", "Ljubljana", "Vrhnika"],
-        3: ["Celje", "Laško", "Ločica ob Savinji", "Ravne na Koroškem",
-            "Slovenske Konjice", "Slovenj Gradec", "Šentjur",
-            "Šmarje pri Jelšah", "Trbovlje", "Velenje"],
-        4: ["Brežice", "Črnomelj", "Kočevje", "Krško", "Novo mesto", "Sevnica"],
-        5: ["Maribor", "Murska Sobota", "Ormož", "Ptuj", "Slovenska Bistrica"],
-    }
-
-    low = raw.lower()
-    for _, mesta in obmocje_map.items():
-        for city in mesta:
-            if city.lower() in low:
-                return city
-    return None
+    # Be robust to aria-label like "petek, 24. 10. 2025" — extract the date part.
+    m = re.search(r"\b(\d{1,2}\.\s*\d{1,2}\.\s*\d{4})\b", s)
+    return m.group(1) if m else s
 
 
-# -------------------- Parser for new singleton layout --------------------
-
-def _parse_block_node(node) -> Dict:
+def _extract_items_linear(html: str) -> List[Dict]:
     """
-    Parse a (summary_tr, details_tr) tuple from the new singleton table.
-    Returns a dict compatible with your DB/upsert expectations.
+    Parse the HTML table linearly to associate rows with their most recent date header.
+    Returns a list of dicts (partially filled) ready for final processing.
     """
-    summary_tr, details_tr = node
+    soup = BeautifulSoup(html, "html.parser")
+    results = soup.select_one("div#results")
+    if not results:
+        log("No div#results found in HTML")
+        if DEBUG:
+            log(f"dumping html snippet (first 500 chars): {html[:500]}")
+        return []
 
+    items = []
+    current_date_str = None
+    
+    # Select ALL relevant rows in order: headers AND content rows
+    # We iterate tr by tr
+    table = results.select_one("table.responsiveTable")
+    if not table:
+         return []
+
+    # Iterate direct children trs to handle structure safely
+    # This assumes flat table structure
+    rows = table.find_all("tr", recursive=False)
+    
+    i = 0
+    while i < len(rows):
+        tr = rows[i]
+        
+        # 1. Check for date header
+        # It might be in this row OR this row acts as date header (calendarBox)
+        ds = _parse_row_date(tr)
+        if ds:
+            current_date_str = ds
+
+        # 2. Check if this is a Summary Row
+        if "js_dogodekBox" in tr.get("class", []):
+            # It's a summary row.
+            # The next row *should* be details (js_dicDetails), but let's verify.
+            summary_tr = tr
+            details_tr = None
+            
+            # Look ahead for details
+            if i + 1 < len(rows):
+                nxt = rows[i+1]
+                if "js_dicDetails" in nxt.get("class", []):
+                    details_tr = nxt
+                    i += 1 # Consume next row
+            
+            # Now parse the block using the current_date_str
+            item = _parse_block_node_linear(summary_tr, details_tr, current_date_str)
+            if item:
+                items.append(item)
+        
+        i += 1
+        
+    return items
+
+
+def _parse_block_node_linear(summary_tr, details_tr, date_str) -> Optional[Dict]:
+    """
+    Parse a (summary, details) pair using the pre-resolved date_str.
+    """
     def _tx(el):
         return re.sub(r"\s+", " ", (el.get_text(strip=True) if el else "")).strip()
-
-    # date
-    date_str = _row_date_str(summary_tr)
 
     # time (td[data-th="Ura"])
     time_str = None
@@ -202,11 +195,6 @@ def _parse_block_node(node) -> Dict:
     if date_str and time_str:
         date_iso, time_iso = _parse_iso(date_str, time_str)
     
-    # Log parsing warnings if essential data is missing
-    if not date_str:
-        # It's possible for there to be rows that aren't slots, but good to know
-        pass 
-
     available = bool((places_left or 0) > 0)
 
     return {
@@ -223,37 +211,6 @@ def _parse_block_node(node) -> Dict:
         "location": location,
         "available": available,
     }
-
-
-# -------------------- Networking --------------------
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
-def _get(session: httpx.Client, url: str, headers: dict):
-    # Log the attempt
-    log(f"GET {url}")
-    r = session.get(url, headers=headers, timeout=30)
-    log(f"GET {url} -> status {r.status_code}")
-    r.raise_for_status()
-    return r
-
-
-def _extract_blocks(html: str):
-    """
-    New layout (singleton): table rows come in pairs:
-      - summary:  <tr class="js_dogodekBox js_dicDetailsBtnRow">
-      - details:  the immediate next <tr class="js_dicDetails">
-    Returns list of (summary_tr, details_tr) tuples.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    results = soup.select_one("div#results")
-    if not results:
-        log("No div#results found in HTML")
-        return []
-    out = []
-    for tr in results.select("table.responsiveTable tr.js_dogodekBox.js_dicDetailsBtnRow"):
-        det = tr.find_next_sibling("tr", class_="js_dicDetails")
-        out.append((tr, det))
-    return out
 
 
 # -------------------- Main fetcher --------------------
@@ -360,28 +317,35 @@ def fetch_all_pages(
 
                 last_len = len(html)
 
-                blocks = _extract_blocks(html)
-                if not blocks:
-                     # sometimes page 1 has no blocks if really empty, but if page 0 had blocks and this doesn't...
-                     log(f"No blocks found on page {page}.")
-                     if page == 0:
-                         log(f"dumping html snippet (first 500 chars): {html[:500]}")
-                     pass
+                last_len = len(html)
 
-                if DEBUG:
-                    print(f"[{page}] blocks detected: {len(blocks)}")
+                # Parse linearly
+                t0 = time.time()
+                try:
+                    stats_items = _extract_items_linear(html)
+                except Exception as pex:
+                    log(f"Parse error on page {page}: {pex}")
+                    stats_items = []
+                
+                dur = time.time() - t0
+                if DEBUG or dur > 1.0:
+                    log(f"Page {page} parsed in {dur:.2f}s, found {len(stats_items)} items.")
+
+                if not stats_items:
+                     # sometimes page 1 has no blocks if really empty, but if page 0 had blocks and this doesn't...
+                     # log(f"No blocks found on page {page}.")
+                     pass
 
                 page_new = 0
                 stop_due_to_cutoff = False
 
-                for node in blocks:
-                    info = _parse_block_node(node)
+                for info in stats_items:
                     date = info["date_str"]
                     time_str = info["time_str"]
 
                     # require at least date+time
                     if not (date and time_str):
-                        log(f"Skipping block without date/time. Raw: {info}")
+                        # log(f"Skipping block without date/time. Raw: {info}")
                         continue
 
                     # cutoff
@@ -414,13 +378,13 @@ def fetch_all_pages(
                     all_items.append(item)
                     page_new += 1
 
-                log(f"Page {page}: found {len(blocks)} blocks, {page_new} new items.")
+                log(f"Page {page}: found {len(stats_items)} blocks, {page_new} new items.")
 
                 if stop_due_to_cutoff:
                     break
                 
-                # Heuristic: if valid page but 0 new items? Could be end of list but not empty HTML.
-                if page > 0 and len(blocks) == 0:
+                # Heuristic: if valid page but 0 items found? Could be end of list but not empty HTML.
+                if page > 0 and len(stats_items) == 0:
                     log(f"Page {page} has 0 blocks, assuming end of pagination.")
                     break
 
