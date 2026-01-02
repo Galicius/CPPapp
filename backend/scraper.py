@@ -35,7 +35,7 @@ MAIN = f"{BASE}/si/javne-evidence/prosti-termini-zemljevid.html?lang=si"
 AJAX = f"{BASE}/si/javne-evidence/prosti-termini-zemljevid/content/singleton.html"
 
 MAX_PAGES = 300               # hard safety cap
-MAX_DAYS_AHEAD = 45           # stop when a slot's date is beyond this many days
+MAX_DAYS_AHEAD = 30           # stop when a slot's date is beyond this many days
 REQUEST_PAUSE = (0.6, 1.1)    # random sleep range between pages (seconds)
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
