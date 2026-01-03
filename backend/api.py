@@ -1,5 +1,6 @@
 # api.py
 import os
+import time
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -74,6 +75,7 @@ def trigger(
     background_tasks.add_task(run_scraper_job)
 
 def run_scraper_job():
+    start_time = time.time()
     try:
         from scraper import fetch_all_pages
         from storage import (
@@ -81,7 +83,7 @@ def run_scraper_job():
             sync_slots_to_supabase, mark_absent_in_supabase,   # <-- add
         )
 
-        slots = fetch_all_pages()
+        slots, pages_scraped = fetch_all_pages()
         opened, updated, seen_keys, scrape_ts, changes = upsert_slots(slots)
 
         # Mirror to Supabase BEFORE local finalize so last_seen_at is consistent
@@ -103,16 +105,18 @@ def run_scraper_job():
             log.warning(f"Notification step failed: {ne}")
 
 
-
+        duration = time.time() - start_time
         store_scrape_log(
             opened=opened,
             updated=updated,
             total=len(slots),
             success=True,
             message="background scrape success",
+            duration_seconds=duration,
+            pages_scraped=pages_scraped,
         )
 
-        log.info(f"Scrape done: opened={opened}, updated={updated}, total={len(slots)}")
+        log.info(f"Scrape done: opened={opened}, updated={updated}, total={len(slots)}, pages={pages_scraped}, dur={duration:.2f}s")
 
     except Exception as e:
         log.exception("Background scrape failed")

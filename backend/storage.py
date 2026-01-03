@@ -74,7 +74,7 @@ def _to_int_or_none(val) -> Optional[int]:
     m = re.search(r"\d+", str(val))
     return int(m.group()) if m else None
 
-def store_scrape_log(opened: int, updated: int, total: int, success: bool, message: str = "") -> bool:
+def store_scrape_log(opened: int, updated: int, total: int, success: bool, message: str = "", duration_seconds: float = 0.0, pages_scraped: int = 0) -> bool:
     """
     Best-effort write of a scrape summary to Supabase.
     Reads SUPABASE_URL and SUPABASE_SERVICE_KEY from env,
@@ -96,7 +96,7 @@ def store_scrape_log(opened: int, updated: int, total: int, success: bool, messa
 
     try:
         sb = create_client(url, key)
-        log_scrape_result(sb, opened=opened, updated=updated, total=total, success=success, message=message)
+        log_scrape_result(sb, opened=opened, updated=updated, total=total, success=success, message=message, duration_seconds=duration_seconds, pages_scraped=pages_scraped)
         return True
     except Exception as e:
         log_stderr(f"Supabase insert failed: {e}")
@@ -315,7 +315,7 @@ class ScrapeMeta(SQLModel, table=True):
     id: int = Field(default=1, primary_key=True)
     last_scraped_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
-def log_scrape_result(client, opened: int, updated: int, total: int, success: bool, message: str = ""):
+def log_scrape_result(client, opened: int, updated: int, total: int, success: bool, message: str = "", duration_seconds: float = 0.0, pages_scraped: int = 0):
     """
     Store scrape metadata and result details in Supabase.
     """
@@ -328,6 +328,8 @@ def log_scrape_result(client, opened: int, updated: int, total: int, success: bo
             "total": total,
             "success": success,
             "message": message,
+            "duration_seconds": duration_seconds,
+            "pages_scraped": pages_scraped,
         }).execute()
     except Exception as e:
         # Fallback logging if Supabase fails

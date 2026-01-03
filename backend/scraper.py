@@ -274,10 +274,11 @@ def fetch_all_pages(
     izpitni_center: str = "-1",
     lokacija: str = "-1",
     max_pages: int = MAX_PAGES,
-) -> List[Dict]:
+) -> Tuple[List[Dict], int]:
     """
     Crawl paginated AJAX endpoint and return list of slot dicts.
     Stops paginating once we encounter a slot beyond MAX_DAYS_AHEAD.
+    Returns (items, total_pages_scraped).
     """
     log(f"START fetch_all_pages config: MAX_PAGES={max_pages}, MAX_DAYS_AHEAD={MAX_DAYS_AHEAD}")
 
@@ -437,7 +438,8 @@ def fetch_all_pages(
                 time.sleep(random.uniform(*REQUEST_PAUSE))
             
             log(f"END fetch_all_pages. Total items: {len(all_items)}")
-            return all_items
+            log(f"END fetch_all_pages. Total items: {len(all_items)}")
+            return all_items, page + 1
 
     except Exception as e:
         log(f"CRITICAL in fetch_all_pages: {e}")
