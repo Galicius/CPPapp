@@ -386,6 +386,7 @@ def sync_slots_to_supabase(items: list[dict], scrape_ts: datetime) -> bool:
     Best-effort; logs warning on failure and returns False.
     """
     log_stderr(f"START sync_slots_to_supabase items={len(items)}")
+    sb = _get_supabase_client()
     if not sb:
         log_stderr("Supabase env not set or client missing; skipping slot sync")
         return False
