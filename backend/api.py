@@ -20,7 +20,7 @@ SCRAPE_SECRET = os.getenv("SCRAPE_SECRET", "")
 
 def _is_authorized(req: Request) -> bool:
     email = req.headers.get("X-Serverless-Authorization-Email") or req.headers.get("X-Goog-Authenticated-User-Email")
-    if email and "scheduler-cppapp@hackaton-421720.iam.gserviceaccount.com" in email:
+    if email and SCHED_SA in email:
         return True
     secret = req.headers.get("X-Secret", "")
     from os import getenv
@@ -73,6 +73,7 @@ def trigger(
 
     # ✅ schedule background job instead of blocking
     background_tasks.add_task(run_scraper_job)
+    return {"status": "accepted"}
 
 def run_scraper_job():
     start_time = time.time()
@@ -80,18 +81,21 @@ def run_scraper_job():
         from scraper import fetch_all_pages
         from storage import (
             upsert_slots, finalize_scrape, set_last_scraped_at, store_scrape_log,
-            sync_slots_to_supabase, mark_absent_in_supabase,   # <-- add
+            sync_slots_to_supabase, mark_absent_in_supabase,
+            sync_slots_to_convex, mark_absent_in_convex,
         )
 
         slots, pages_scraped = fetch_all_pages()
         opened, updated, seen_keys, scrape_ts, changes = upsert_slots(slots)
 
         # Mirror to Supabase BEFORE local finalize so last_seen_at is consistent
-        sync_slots_to_supabase(slots, scrape_ts)            # <-- add
+        sync_slots_to_supabase(slots, scrape_ts)
+        sync_slots_to_convex(slots, scrape_ts)
 
         finalize_scrape(scrape_ts)
         # Mirror 'finalize' semantics to Supabase too
-        mark_absent_in_supabase(scrape_ts)                     # <-- add
+        mark_absent_in_supabase(scrape_ts)
+        mark_absent_in_convex(scrape_ts)
 
         set_last_scraped_at(scrape_ts)
 
@@ -138,8 +142,20 @@ def slots_all(
     include_fields: str | None = Query(default=None, description="Comma list of extra fields: obmocje,town,exam_type,places_left,tolmac,source_page,created_at,updated_at"),
 ):
     tz = ZoneInfo("Europe/Ljubljana")
+    stmt = select(Slot).where(Slot.available == True)
+
+    if region:
+        try:
+            stmt = stmt.where(Slot.obmocje == int(region))
+        except ValueError:
+            pass
+
+    stmt = stmt.order_by(Slot.date_iso, Slot.time_iso)
+    if isinstance(limit, int) and limit > 0:
+        stmt = stmt.limit(min(limit, 10000))
+
     with Session(engine) as ses:
-        rows = ses.exec(select(Slot)).all()
+        rows = ses.exec(stmt).all()
 
     def _d(s: str): return datetime.strptime(s.strip(), "%d. %m. %Y").date()
     def _t(s: str | None): return datetime.strptime((s or "00:00").strip(), "%H:%M").time()
@@ -171,8 +187,6 @@ def slots_all(
 
     items.sort(key=lambda x: (x[0], x[1]))
     out = [t[2] for t in items]
-    if isinstance(limit, int) and limit > 0: out = out[: min(limit, 10000)]
-
     last = get_last_scraped_at()
     last_local = last.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz).isoformat(timespec="seconds") if last else None
     return {"last_scraped_at": last_local, "count": len(out), "items": out}

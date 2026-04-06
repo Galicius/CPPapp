@@ -3,9 +3,9 @@ from typing import Optional
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy import text
 import os
-import re
 import sys
 import logging
+from storage_helpers import to_int_or_none
 
 
 
@@ -17,8 +17,10 @@ def log_stderr(msg: str):
     print(f"[{ts}] [STORAGE] {msg}", file=sys.stderr, flush=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("Missing required environment variable: DATABASE_URL")
+
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-new_or_reappeared: list[dict] = []
 
 class Slot(SQLModel, table=True):
     __tablename__ = "slot"  # type: ignore[assignment]
@@ -67,12 +69,7 @@ def _to_int_or_none(val) -> Optional[int]:
     Returns None if conversion fails or no digits are found.
     Keeps storage robust even if scraper changes.
     """
-    if val is None:
-        return None
-    if isinstance(val, int):
-        return val
-    m = re.search(r"\d+", str(val))
-    return int(m.group()) if m else None
+    return to_int_or_none(val)
 
 def store_scrape_log(opened: int, updated: int, total: int, success: bool, message: str = "", duration_seconds: float = 0.0, pages_scraped: int = 0) -> bool:
     """
@@ -103,7 +100,7 @@ def store_scrape_log(opened: int, updated: int, total: int, success: bool, messa
         return False
 
 
-def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
+def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime, list[dict]]:
     """
     Insert new or update existing slots by unique key.
     Meaningful change = slot appears or disappears (presence).
@@ -116,6 +113,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int, set[tuple], datetime]:
     scrape_ts = now
     opened = updated = 0
     seen_keys: set[tuple] = set()
+    new_or_reappeared: list[dict] = []
 
     if not items:
          return opened, updated, seen_keys, scrape_ts, []
@@ -467,3 +465,98 @@ def mark_absent_in_supabase(scrape_ts: datetime) -> bool:
     except Exception as e:
         log_stderr(f"Supabase finalize mirror failed: {e}")
         return False
+
+# --- Convex Sync ---
+
+import requests
+
+def _get_convex_url(action_path: str) -> Optional[str]:
+    site_url = os.getenv("CONVEX_SITE_URL")
+    if not site_url:
+        return None
+    return f"{site_url.rstrip('/')}/{action_path}"
+
+def _get_convex_headers() -> dict:
+    secret = os.getenv("CONVEX_SCRAPER_SECRET")
+    if not secret:
+        log_stderr("Missing CONVEX_SCRAPER_SECRET")
+        return {}
+    return {
+        "Authorization": f"Bearer {secret}",
+        "Content-Type": "application/json"
+    }
+
+def sync_slots_to_convex(items: list[dict], scrape_ts: datetime) -> bool:
+    """
+    Pushes the newly scraped slots to Convex via HTTP Action.
+    """
+    log_stderr(f"START sync_slots_to_convex items={len(items)}")
+    url = _get_convex_url("syncSlots")
+    headers = _get_convex_headers()
+    
+    if not url or not headers.get("Authorization"):
+        log_stderr("Convex env not set; skipping slot sync")
+        return False
+
+    if not items:
+        return True
+
+    rows_current = []
+    
+    # Format dates to string for JSON serialization
+    for it in items:
+        rec = _normalize_dt_fields(it)
+        rows_current.append({
+            "date_str": rec["date_str"],
+            "time_str": rec["time_str"],
+            "date_iso": rec["date_iso"].isoformat() if rec.get("date_iso") else None,
+            "time_iso": rec["time_iso"].isoformat() if rec.get("time_iso") else None,
+            "obmocje": rec.get("obmocje"),
+            "town": rec.get("town"),
+            "exam_type": rec.get("exam_type"),
+            "places_left": _to_int_or_none(rec.get("places_left")),
+            "tolmac": bool(rec.get("tolmac")),
+            "categories": rec.get("categories", "") or "",
+            "source_page": rec.get("source_page"),
+            "location": rec.get("location")
+        })
+
+    try:
+        response = requests.post(
+            url, 
+            json={"items": rows_current, "scrape_ts": scrape_ts.isoformat()},
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+        log_stderr("END sync_slots_to_convex success")
+        return True
+    except Exception as e:
+        log_stderr(f"Convex slot sync failed: {e}")
+        return False
+
+def mark_absent_in_convex(scrape_ts: datetime) -> bool:
+    """
+    Triggers Convex to mark un-seen slots as unavailable.
+    """
+    log_stderr("START mark_absent_in_convex")
+    url = _get_convex_url("markAbsent")
+    headers = _get_convex_headers()
+    
+    if not url or not headers.get("Authorization"):
+        return False
+        
+    try:
+        response = requests.post(
+            url, 
+            json={"scrape_ts": scrape_ts.isoformat()},
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+        log_stderr("END mark_absent_in_convex success")
+        return True
+    except Exception as e:
+        log_stderr(f"Convex finalize mirror failed: {e}")
+        return False
+

@@ -5,6 +5,7 @@ import os
 import httpx
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
+from notification_policy import canonical_subscriptions, slot_within_notification_window
 from storage import _get_supabase_client, log_scrape_result
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,7 @@ RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_API_URL = "https://api.resend.com/emails"
 MAIL_FROM = os.getenv("MAIL_FROM", "ExamAlert <obvestila@vozniski.si>")
 FRONTEND_UNSUB_BASE = os.getenv("FRONTEND_UNSUB_BASE", "https://vozniski.si/api/unsubscribe")
+NOTIFICATION_WINDOW_DAYS = int(os.getenv("NOTIFICATION_WINDOW_DAYS", "25"))
 
 def _resend_send(to: List[str] | str, subject: str, html: str, text: Optional[str] = None) -> bool:
     if not RESEND_API_KEY:
@@ -201,6 +203,22 @@ def _fetch_active_subscriptions() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
+def _parse_slot_date(slot: Dict[str, Any]) -> Optional[datetime]:
+    try:
+        return datetime.strptime(str(slot.get("date_str") or "").strip(), "%d. %m. %Y")
+    except Exception:
+        return None
+
+def _slot_within_notification_window(
+    slot: Dict[str, Any],
+    scrape_ts: datetime,
+    max_days: int = NOTIFICATION_WINDOW_DAYS,
+) -> bool:
+    return slot_within_notification_window(slot, scrape_ts, max_days)
+
+def _canonical_subscriptions(subs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return canonical_subscriptions(subs)
+
 def _match(sub: Dict[str, Any], slot: Dict[str, Any]) -> bool:
     # obmocje
     if sub.get("filter_obmocje") is not None:
@@ -238,18 +256,27 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
     if not changes:
         return 0
 
-    subs = _fetch_active_subscriptions()
+    subs = _canonical_subscriptions(_fetch_active_subscriptions())
     if not subs:
         return 0
 
-    # build matches per subscription id
-    by_sub: dict[int, list[Dict[str, Any]]] = {}
+    # Build one deduplicated slot bucket per canonical subscription (one per email).
+    by_sub: dict[int, dict[str, Dict[str, Any]]] = {}
     for slot in changes:
+        if not _slot_within_notification_window(slot, scrape_ts):
+            continue
         for sub in subs:
             if not sub.get("active", True):
                 continue
             if _match(sub, slot):
-                by_sub.setdefault(int(sub["id"]), []).append(slot)
+                slot_key = "|".join([
+                    str(slot.get("date_str") or ""),
+                    str(slot.get("time_str") or ""),
+                    str(slot.get("location") or ""),
+                    str(slot.get("categories") or ""),
+                    str(slot.get("exam_type") or ""),
+                ])
+                by_sub.setdefault(int(sub["id"]), {})[slot_key] = slot
 
     if not by_sub:
         return 0
@@ -258,7 +285,7 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
     sent = 0
     for sub in subs:
         sid = int(sub["id"])
-        items = by_sub.get(sid)
+        items = list((by_sub.get(sid) or {}).values())
         if not items:
             continue
         subject, text, html = _render_email(sub, items)
