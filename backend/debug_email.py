@@ -2,16 +2,9 @@
 import os
 import sys
 
-# Mock storage to avoid DB connection
-class MockSupabase:
-    def table(self, name): return self
-    def select(self, *args): return self
-    def eq(self, *args): return self
-    def execute(self): return type('obj', (object,), {'data': []})
-
 sys.modules['storage'] = type('module', (object,), {
-    '_get_supabase_client': lambda: MockSupabase(), 
-    'log_scrape_result': lambda *args, **kwargs: None
+    'post_to_convex': lambda *args, **kwargs: {"ok": True},
+    'store_scrape_log': lambda *args, **kwargs: True,
 })
 
 # Import notifications after mocking

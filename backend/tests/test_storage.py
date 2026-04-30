@@ -1,9 +1,7 @@
-import os
 import unittest
 from pathlib import Path
 import sys
 
-os.environ.setdefault("DATABASE_URL", "sqlite://")
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from storage_helpers import to_int_or_none

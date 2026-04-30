@@ -3,16 +3,10 @@ import os
 import time
 import logging
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Query, Header, Request, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from sqlmodel import Session, select
-from sqlalchemy import text
 from scraper import fetch_all_pages
-from storage import (
-    engine, Slot, upsert_slots, set_last_scraped_at, store_scrape_log,
-    get_last_scraped_at, finalize_scrape,
-)
+from storage import fetch_slots_from_convex
 
 DEFAULT_SLOTS_EXTRAS = "places_left,exam_type,tolmac,obmocje,town"
 SCHED_SA = "scheduler-cppapp@hackaton-421720.iam.gserviceaccount.com"
@@ -41,24 +35,6 @@ app.add_middleware(
 
 log = logging.getLogger("uvicorn.error")
 
-def _serialize_slot(s: Slot, extra: set[str]):
-    it = {
-        "date_str": s.date_str,
-        "time_str": s.time_str,
-        "location": s.location,
-        "categories": s.categories,
-    }
-    if "obmocje" in extra:     it["obmocje"] = s.obmocje
-    if "town" in extra:        it["town"] = s.town
-    if "exam_type" in extra:   it["exam_type"] = s.exam_type
-    if "places_left" in extra: it["places_left"] = s.places_left or 0
-    if "tolmac" in extra:      it["tolmac"] = bool(s.tolmac)
-    if "created_at" in extra and s.created_at:
-        it["created_at"] = s.created_at.isoformat(timespec="seconds")
-    if "updated_at" in extra and s.updated_at:
-        it["updated_at"] = s.updated_at.isoformat(timespec="seconds")
-    return it
-
 @app.post("/admin/trigger-scrape")
 def trigger(
     request: Request,
@@ -80,24 +56,16 @@ def run_scraper_job():
     try:
         from scraper import fetch_all_pages
         from storage import (
-            upsert_slots, finalize_scrape, set_last_scraped_at, store_scrape_log,
-            sync_slots_to_supabase, mark_absent_in_supabase,
-            sync_slots_to_convex, mark_absent_in_convex,
+            store_scrape_log, sync_slots_to_convex, mark_absent_in_convex,
         )
 
         slots, pages_scraped = fetch_all_pages()
-        opened, updated, seen_keys, scrape_ts, changes = upsert_slots(slots)
-
-        # Mirror to Supabase BEFORE local finalize so last_seen_at is consistent
-        sync_slots_to_supabase(slots, scrape_ts)
-        sync_slots_to_convex(slots, scrape_ts)
-
-        finalize_scrape(scrape_ts)
-        # Mirror 'finalize' semantics to Supabase too
-        mark_absent_in_supabase(scrape_ts)
+        scrape_ts = datetime.utcnow()
+        sync_result = sync_slots_to_convex(slots, scrape_ts)
+        opened = int(sync_result.get("opened") or 0)
+        updated = int(sync_result.get("updated") or 0)
+        changes = list(sync_result.get("changes") or [])
         mark_absent_in_convex(scrape_ts)
-
-        set_last_scraped_at(scrape_ts)
 
         # --- Notifications ---
         try:
@@ -132,7 +100,7 @@ def run_scraper_job():
 
 @app.get("/healthz")
 def health():
-    return {"ok": True}
+    return {"ok": True, "database": "convex"}
 
 @app.get("/slots_all")
 def slots_all(
@@ -141,43 +109,25 @@ def slots_all(
     limit: int | None = Query(default=None, description="Optional max items"),
     include_fields: str | None = Query(default=None, description="Comma list of extra fields: obmocje,town,exam_type,places_left,tolmac,source_page,created_at,updated_at"),
 ):
-    tz = ZoneInfo("Europe/Ljubljana")
-    stmt = select(Slot).where(Slot.available == True)
-
-    if region:
-        try:
-            stmt = stmt.where(Slot.obmocje == int(region))
-        except ValueError:
-            pass
-
-    stmt = stmt.order_by(Slot.date_iso, Slot.time_iso)
-    if isinstance(limit, int) and limit > 0:
-        stmt = stmt.limit(min(limit, 10000))
-
-    with Session(engine) as ses:
-        rows = ses.exec(stmt).all()
-
     def _d(s: str): return datetime.strptime(s.strip(), "%d. %m. %Y").date()
     def _t(s: str | None): return datetime.strptime((s or "00:00").strip(), "%H:%M").time()
 
+    data = fetch_slots_from_convex()
+    rows = data.get("items") or []
+
     items = []
-    for s in rows:
+    for row in rows:
         try:
-            d = _d(s.date_str)
+            d = _d(row.get("date_str") or "")
         except Exception:
             continue
-        it = {"date_str": s.date_str, "time_str": s.time_str, "location": s.location, "categories": s.categories}
-        if include_fields:
-            extra = {f.strip() for f in include_fields.split(",") if f.strip()}
-            if "obmocje" in extra:     it["obmocje"] = s.obmocje
-            if "town" in extra:        it["town"] = s.town
-            if "exam_type" in extra:   it["exam_type"] = s.exam_type
-            if "places_left" in extra: it["places_left"] = s.places_left
-            if "tolmac" in extra:      it["tolmac"] = s.tolmac
-            if "source_page" in extra: it["source_page"] = s.source_page
-            if "created_at" in extra and s.created_at: it["created_at"] = s.created_at.isoformat(timespec="seconds")
-            if "updated_at" in extra and s.updated_at: it["updated_at"] = s.updated_at.isoformat(timespec="seconds")
-        items.append((d, _t(s.time_str), it))
+        if region:
+            try:
+                if int(row.get("obmocje") or -1) != int(region):
+                    continue
+            except ValueError:
+                pass
+        items.append((d, _t(row.get("time_str")), row))
 
     if cat:
         want = {x.strip() for x in cat.split(",") if x.strip()}
@@ -187,6 +137,6 @@ def slots_all(
 
     items.sort(key=lambda x: (x[0], x[1]))
     out = [t[2] for t in items]
-    last = get_last_scraped_at()
-    last_local = last.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz).isoformat(timespec="seconds") if last else None
-    return {"last_scraped_at": last_local, "count": len(out), "items": out}
+    if isinstance(limit, int) and limit > 0:
+        out = out[:min(limit, 10000)]
+    return {"last_scraped_at": data.get("last_scraped_at"), "count": len(out), "items": out}

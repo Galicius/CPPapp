@@ -6,7 +6,7 @@ import httpx
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 from notification_policy import canonical_subscriptions, slot_within_notification_window
-from storage import _get_supabase_client, log_scrape_result
+from storage import post_to_convex, store_scrape_log
 from zoneinfo import ZoneInfo
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
@@ -193,15 +193,10 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
     return subject, text, html
 
 def _fetch_active_subscriptions() -> List[Dict[str, Any]]:
-    sb = _get_supabase_client()
-    if not sb:
+    res = post_to_convex("notifications/subscriptions", {})
+    if not res or not res.get("ok"):
         return []
-    try:
-        res = sb.table("subscriptions").select("*").eq("active", True).execute()
-        # python-supabase returns .data
-        return list(res.data or [])
-    except Exception:
-        return []
+    return list(res.get("subscriptions") or [])
 
 def _parse_slot_date(slot: Dict[str, Any]) -> Optional[datetime]:
     try:
@@ -261,7 +256,7 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
         return 0
 
     # Build one deduplicated slot bucket per canonical subscription (one per email).
-    by_sub: dict[int, dict[str, Dict[str, Any]]] = {}
+    by_sub: dict[str, dict[str, Dict[str, Any]]] = {}
     for slot in changes:
         if not _slot_within_notification_window(slot, scrape_ts):
             continue
@@ -276,15 +271,14 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
                     str(slot.get("categories") or ""),
                     str(slot.get("exam_type") or ""),
                 ])
-                by_sub.setdefault(int(sub["id"]), {})[slot_key] = slot
+                by_sub.setdefault(str(sub["id"]), {})[slot_key] = slot
 
     if not by_sub:
         return 0
 
-    sb = _get_supabase_client()
     sent = 0
     for sub in subs:
-        sid = int(sub["id"])
+        sid = str(sub["id"])
         items = list((by_sub.get(sid) or {}).values())
         if not items:
             continue
@@ -293,14 +287,10 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
         if ok:
             sent += 1
             # best-effort: update last_notified_at
-            try:
-                if sb:
-                    sb.table("subscriptions") \
-                      .update({"last_notified_at": scrape_ts.isoformat()}) \
-                      .eq("id", sid) \
-                      .execute()
-            except Exception:
-                pass
+            post_to_convex(
+                "notifications/subscription/notified",
+                {"id": sid, "last_notified_at": scrape_ts.isoformat()},
+            )
 
     return sent
 
@@ -348,29 +338,20 @@ def send_daily_summary_if_due(now_utc: datetime) -> bool:
     then inserts a marker row `message='daily_summary_sent YYYY-MM-DD'`.
     Returns True if an email was sent.
     """
-    sb = _get_supabase_client()
-    if not sb or not RESEND_API_KEY:
+    if not RESEND_API_KEY:
         return False
 
     day_label, start_iso_utc, end_iso_utc = _dt_range_for_local_day(now_utc, "Europe/Ljubljana")
     marker_msg = f"daily_summary_sent {day_label}"
 
-    try:
-        # Idempotency check
-        chk = sb.table("scrape_logs").select("id").eq("message", marker_msg).execute()
-        if (chk.data or []):
-            return False
-
-        # Pull today's logs
-        res = sb.table("scrape_logs") \
-                .select("timestamp,opened,updated,total,success,message") \
-                .gte("timestamp", start_iso_utc) \
-                .lte("timestamp", end_iso_utc) \
-                .order("timestamp", desc=False) \
-                .execute()
-        rows = list(res.data or [])
-    except Exception:
+    marker = post_to_convex("scrape/log/marker", {"message": marker_msg})
+    if marker and marker.get("exists"):
         return False
+
+    res = post_to_convex("scrape/logs/range", {"start": start_iso_utc, "end": end_iso_utc})
+    if not res or not res.get("ok"):
+        return False
+    rows = list(res.get("logs") or [])
 
     if not rows:
         return False
@@ -408,16 +389,6 @@ def send_daily_summary_if_due(now_utc: datetime) -> bool:
         return False
 
     # Marker row to prevent duplicate sends the same day
-    try:
-        log_scrape_result(sb, opened=0, updated=0, total=0, success=True, message=marker_msg)
-    except Exception:
-        try:
-            sb.table("scrape_logs").insert({
-                "timestamp": datetime.utcnow().isoformat(),
-                "opened": 0, "updated": 0, "total": 0,
-                "success": True, "message": marker_msg,
-            }).execute()
-        except Exception:
-            pass
+    store_scrape_log(opened=0, updated=0, total=0, success=True, message=marker_msg)
 
     return True

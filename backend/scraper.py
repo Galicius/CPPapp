@@ -14,8 +14,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlencode
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from storage import upsert_slots
-
 LOCAL_TZ = ZoneInfo("Europe/Ljubljana")
 
 
