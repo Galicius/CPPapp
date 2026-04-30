@@ -40,14 +40,6 @@ def main():
             "categories": "B", 
             "exam_type": "voznja",
             "places_left": 2
-        },
-         {
-            "date_str": "15. 1. 2026",
-            "time_str": "10:30",
-            "location": "DOMŽALE - Ljubljanska cesta 12",
-            "categories": "B, B1", 
-            "exam_type": "teorija",
-            "places_left": 15
         }
     ]
 
