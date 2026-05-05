@@ -21,15 +21,19 @@ def slot_within_notification_window(
     return 0 <= delta_days <= max_days
 
 
+def subscription_order_key(sub: Dict[str, Any]) -> tuple[str, str]:
+    return (str(sub.get("created_at") or ""), str(sub.get("id") or ""))
+
+
 def canonical_subscriptions(subs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     latest_by_email: Dict[str, Dict[str, Any]] = {}
     for sub in subs:
         email = str(sub.get("email") or "").strip().lower()
         if not email:
             continue
-        candidate_key = (str(sub.get("created_at") or ""), int(sub.get("id") or 0))
+        candidate_key = subscription_order_key(sub)
         current = latest_by_email.get(email)
-        current_key = (str(current.get("created_at") or ""), int(current.get("id") or 0)) if current else ("", -1)
+        current_key = subscription_order_key(current) if current else ("", "")
         if current is None or candidate_key >= current_key:
             latest_by_email[email] = sub
     return list(latest_by_email.values())

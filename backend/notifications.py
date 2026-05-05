@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import sys
+from html import escape
 import httpx
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import List, Dict, Any, Optional, Tuple
 from notification_policy import canonical_subscriptions, slot_within_notification_window
 from storage import post_to_convex, store_scrape_log
@@ -15,8 +17,14 @@ MAIL_FROM = os.getenv("MAIL_FROM", "ExamAlert <obvestila@vozniski.si>")
 FRONTEND_UNSUB_BASE = os.getenv("FRONTEND_UNSUB_BASE", "https://vozniski.si/api/unsubscribe")
 NOTIFICATION_WINDOW_DAYS = int(os.getenv("NOTIFICATION_WINDOW_DAYS", "25"))
 
+
+def _log(msg: str) -> None:
+    print(f"[{datetime.now(UTC).isoformat()}] [NOTIFICATIONS] {msg}", file=sys.stderr, flush=True)
+
+
 def _resend_send(to: List[str] | str, subject: str, html: str, text: Optional[str] = None) -> bool:
     if not RESEND_API_KEY:
+        _log("RESEND_API_KEY missing; skipping email send")
         return False
     payload = {
         "from": MAIL_FROM,
@@ -35,7 +43,10 @@ def _resend_send(to: List[str] | str, subject: str, html: str, text: Optional[st
             )
             r.raise_for_status()
             return True
-    except Exception:
+    except Exception as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        body = getattr(getattr(exc, "response", None), "text", "")
+        _log(f"Resend send failed status={status} error={exc} body={body[:500]}")
         return False
 
 # Styles
@@ -47,30 +58,79 @@ TEXT_GRAY = "#94a3b8"   # slate-400
 ACCENT = "#3b82f6"      # blue-500
 BORDER = "#334155"      # slate-700
 
-def _fmt_bool_si(b: bool) -> str:
-    return "da" if b else "ne"
+SUPPORTED_LANGUAGES = {"sl", "en"}
 
-def _slot_text_line(it: Dict[str, Any]) -> str:
+EMAIL_COPY = {
+    "sl": {
+        "unknown_area": "Vsa obmocja",
+        "area": "Obmocje",
+        "all_categories": "Vse kategorije",
+        "all_types": "Vsi tipi",
+        "subject": "Novi termini ({n}) - {location}",
+        "greeting": "Pozdravljeni,",
+        "found": "Nasli smo {n} novih terminov za vase kriterije:",
+        "at": "ob",
+        "unknown_location": "Neznano",
+        "category": "kat",
+        "type": "Tip",
+        "places": "mesta",
+        "free_places": "prostih mest",
+        "headline": "Hitro se prijavi!",
+        "intro": "Nasli smo <strong style=\"color: {text_white}\">{n}</strong> novih terminov, ki ustrezajo vasim zeljam:",
+        "footer": "To sporocilo ste prejeli, ker ste naroceni na obvestila na Vozniski.si.",
+        "unsubscribe": "Odjava od obvestil",
+        "unsubscribe_text": "Odjava",
+        "html_lang": "sl",
+    },
+    "en": {
+        "unknown_area": "All regions",
+        "area": "Region",
+        "all_categories": "All categories",
+        "all_types": "All types",
+        "subject": "New exam slots ({n}) - {location}",
+        "greeting": "Hello,",
+        "found": "We found {n} new slots matching your criteria:",
+        "at": "at",
+        "unknown_location": "Unknown",
+        "category": "cat",
+        "type": "Type",
+        "places": "places",
+        "free_places": "free places",
+        "headline": "Book quickly!",
+        "intro": "We found <strong style=\"color: {text_white}\">{n}</strong> new slots matching your preferences:",
+        "footer": "You received this message because you subscribed to notifications on Vozniski.si.",
+        "unsubscribe": "Unsubscribe from notifications",
+        "unsubscribe_text": "Unsubscribe",
+        "html_lang": "en",
+    },
+}
+
+def _lang(value: Any) -> str:
+    return value if value in SUPPORTED_LANGUAGES else "sl"
+
+def _slot_text_line(it: Dict[str, Any], lang: str = "sl") -> str:
+    c = EMAIL_COPY[_lang(lang)]
     # Keeps plain text version simple
     parts = [
-        f"{it['date_str']} ob {it['time_str']}",
+        f"{it['date_str']} {c['at']} {it['time_str']}",
         f"{it.get('location') or ''}".strip(),
-        f"kat: {it.get('categories') or '-'}",
+        f"{c['category']}: {it.get('categories') or '-'}",
     ]
     if it.get("exam_type"):
-        parts.append(f"Tip: {it['exam_type']}")
+        parts.append(f"{c['type']}: {it['exam_type']}")
     if it.get("places_left") is not None:
-        parts.append(f"mesta: {it['places_left']}")
+        parts.append(f"{c['places']}: {it['places_left']}")
     return " | ".join([p for p in parts if p])
 
-def _render_slots_html(items: List[Dict[str, Any]]) -> str:
+def _render_slots_html(items: List[Dict[str, Any]], lang: str = "sl") -> str:
+    c = EMAIL_COPY[_lang(lang)]
     rows = []
     for it in items:
         # Data preparation
-        date_time = f"{it['date_str']} <span style='color: {TEXT_GRAY}; font-weight: normal;'>ob</span> {it['time_str']}"
-        loc = it.get('location') or "Neznano"
-        cats = it.get('categories') or "-"
-        exam_type = it.get('exam_type') or ""
+        date_time = f"{escape(str(it['date_str']))} <span style='color: {TEXT_GRAY}; font-weight: normal;'>{c['at']}</span> {escape(str(it['time_str']))}"
+        loc = escape(str(it.get('location') or c["unknown_location"]))
+        cats = escape(str(it.get('categories') or "-"))
+        exam_type = escape(str(it.get('exam_type') or ""))
         places = it.get('places_left')
         
         meta_parts = []
@@ -78,7 +138,7 @@ def _render_slots_html(items: List[Dict[str, Any]]) -> str:
         if exam_type:
             meta_parts.append(f"<span>{exam_type.capitalize()}</span>")
         if places is not None:
-            meta_parts.append(f"<span>{places} prostih mest</span>")
+            meta_parts.append(f"<span>{escape(str(places))} {c['free_places']}</span>")
         
         meta_html = " &bull; ".join(meta_parts)
 
@@ -111,6 +171,74 @@ def _render_slots_html(items: List[Dict[str, Any]]) -> str:
     return "\n".join(rows)
 
 def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str, str, str]:
+    lang = _lang(sub.get("language"))
+    c = EMAIL_COPY[lang]
+    label_loc = sub.get("filter_town") or (f"{c['area']} {int(sub['filter_obmocje'])}" if sub.get("filter_obmocje") is not None else c["unknown_area"])
+    label_cat = sub.get("filter_categories") or c["all_categories"]
+    n = len(items)
+    subject = c["subject"].format(n=n, location=label_loc)
+
+    text_lines = [c["greeting"], "", c["found"].format(n=n), ""]
+    for it in items:
+        text_lines.append(f" - {_slot_text_line(it, lang)}")
+    text_lines.append("")
+    unsub_token = sub.get("unsubscribe_token")
+    if unsub_token:
+        text_lines.append(f"{c['unsubscribe_text']}: {FRONTEND_UNSUB_BASE}?token={unsub_token}")
+    text_lines.append("")
+    text = "\n".join(text_lines)
+
+    slots_html = _render_slots_html(items, lang)
+    intro = c["intro"].format(n=n, text_white=TEXT_WHITE)
+    unsubscribe_html = (
+        f'<p style="font-size: 12px; margin: 0;"><a href="{FRONTEND_UNSUB_BASE}?token={unsub_token}" style="color: {TEXT_GRAY}; text-decoration: underline;">{c["unsubscribe"]}</a></p>'
+        if unsub_token
+        else ""
+    )
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="{c['html_lang']}">
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{escape(subject)}</title>
+    </head>
+    <body style="{FONT_MAIN} margin: 0; padding: 0; background-color: {BG_DARK}; color: {TEXT_WHITE};">
+        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: {BG_DARK}; width: 100%;">
+            <tr>
+                <td align="center" style="padding: 40px 10px;">
+                    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 600px; width: 100%;">
+                        <tr>
+                            <td align="center" style="padding-bottom: 40px;">
+                                <h1 style="margin: 0; font-size: 28px; font-weight: 800; color: {TEXT_WHITE}; letter-spacing: -0.5px;">Vozniski.si</h1>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding-bottom: 30px; text-align: center;">
+                                <h2 style="margin: 0 0 10px 0; font-size: 24px; font-weight: bold; color: {TEXT_WHITE};">{c['headline']}</h2>
+                                <p style="margin: 0; font-size: 16px; line-height: 1.5; color: {TEXT_GRAY};">{intro}</p>
+                                <p style="margin: 8px 0 0 0; font-size: 14px; font-weight: 500; color: {ACCENT}; text-transform: uppercase; letter-spacing: 0.5px;">
+                                    {escape(str(label_loc))} &bull; {escape(str(label_cat))}
+                                </p>
+                            </td>
+                        </tr>
+                        {slots_html}
+                        <tr>
+                            <td style="border-top: 1px solid {BORDER}; padding-top: 20px; text-align: center;">
+                                <p style="font-size: 12px; color: {TEXT_GRAY}; margin: 0 0 10px 0;">{c['footer']}</p>
+                                {unsubscribe_html}
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    """
+    return subject, text, html
+
     # Labels for context
     label_loc = sub.get("filter_town") or (f"Območje {int(sub['filter_obmocje'])}" if sub.get("filter_obmocje") is not None else "Vsa območja")
     label_cat = sub.get("filter_categories") or "Vse kategorije"
@@ -195,8 +323,11 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
 def _fetch_active_subscriptions() -> List[Dict[str, Any]]:
     res = post_to_convex("notifications/subscriptions", {})
     if not res or not res.get("ok"):
+        _log("Failed to fetch active subscriptions from Convex")
         return []
-    return list(res.get("subscriptions") or [])
+    subscriptions = list(res.get("subscriptions") or [])
+    _log(f"Fetched active subscriptions count={len(subscriptions)}")
+    return subscriptions
 
 def _parse_slot_date(slot: Dict[str, Any]) -> Optional[datetime]:
     try:
@@ -249,21 +380,27 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
     Returns number of subscription emails sent.
     """
     if not changes:
+        _log("No slot changes from sync; skipping subscriber notifications")
         return 0
 
     subs = _canonical_subscriptions(_fetch_active_subscriptions())
     if not subs:
+        _log("No active subscriptions after canonicalization; skipping subscriber notifications")
         return 0
 
     # Build one deduplicated slot bucket per canonical subscription (one per email).
     by_sub: dict[str, dict[str, Dict[str, Any]]] = {}
+    out_of_window = 0
+    match_count = 0
     for slot in changes:
         if not _slot_within_notification_window(slot, scrape_ts):
+            out_of_window += 1
             continue
         for sub in subs:
             if not sub.get("active", True):
                 continue
             if _match(sub, slot):
+                match_count += 1
                 slot_key = "|".join([
                     str(slot.get("date_str") or ""),
                     str(slot.get("time_str") or ""),
@@ -274,9 +411,14 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
                 by_sub.setdefault(str(sub["id"]), {})[slot_key] = slot
 
     if not by_sub:
+        _log(
+            f"No matching subscriptions for changes={len(changes)} "
+            f"canonical_subscriptions={len(subs)} out_of_window={out_of_window}"
+        )
         return 0
 
     sent = 0
+    failed = 0
     for sub in subs:
         sid = str(sub["id"])
         items = list((by_sub.get(sid) or {}).values())
@@ -291,7 +433,14 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
                 "notifications/subscription/notified",
                 {"id": sid, "last_notified_at": scrape_ts.isoformat()},
             )
+        else:
+            failed += 1
 
+    _log(
+        f"Subscriber notification result changes={len(changes)} "
+        f"canonical_subscriptions={len(subs)} matched_pairs={match_count} "
+        f"out_of_window={out_of_window} sent={sent} failed={failed}"
+    )
     return sent
 
 def send_test_email(scrape_stats: dict, changes: List[Dict[str, Any]]) -> bool:

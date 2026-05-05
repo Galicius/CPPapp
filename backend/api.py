@@ -69,13 +69,18 @@ def run_scraper_job():
 
         # --- Notifications ---
         try:
-            from notifications import notify_subscribers_for_changes, send_daily_summary_if_due
+            from notifications import notify_subscribers_for_changes
             sent = notify_subscribers_for_changes(changes, scrape_ts)
-            _ = send_daily_summary_if_due(scrape_ts)  # once/day daily rollup
-            log.info(f"Notifications sent: subs={sent}, daily_summary=attempted")
+            log.info(f"Notifications sent: subs={sent}")
         except Exception as ne:
             log.warning(f"Notification step failed: {ne}")
 
+        try:
+            from notifications import send_daily_summary_if_due
+            daily_sent = send_daily_summary_if_due(scrape_ts)  # once/day daily rollup
+            log.info(f"Daily summary attempted: sent={daily_sent}")
+        except Exception as ne:
+            log.warning(f"Daily summary step failed: {ne}")
 
         duration = time.time() - start_time
         store_scrape_log(
