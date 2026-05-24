@@ -57,6 +57,7 @@ def run_scraper_job():
         from scraper import fetch_all_pages
         from storage import (
             store_scrape_log, sync_slots_to_convex, mark_absent_in_convex,
+            revalidate_slots_cache,
         )
 
         slots, pages_scraped = fetch_all_pages()
@@ -66,21 +67,16 @@ def run_scraper_job():
         updated = int(sync_result.get("updated") or 0)
         changes = list(sync_result.get("changes") or [])
         mark_absent_in_convex(scrape_ts)
+        revalidate_slots_cache()
 
         # --- Notifications ---
+        notification_stats = None
         try:
             from notifications import notify_subscribers_for_changes
-            sent = notify_subscribers_for_changes(changes, scrape_ts)
-            log.info(f"Notifications sent: subs={sent}")
+            notification_stats = notify_subscribers_for_changes(changes, scrape_ts)
+            log.info(f"Notifications sent: subs={notification_stats.get('sent', 0)}")
         except Exception as ne:
             log.warning(f"Notification step failed: {ne}")
-
-        try:
-            from notifications import send_daily_summary_if_due
-            daily_sent = send_daily_summary_if_due(scrape_ts)  # once/day daily rollup
-            log.info(f"Daily summary attempted: sent={daily_sent}")
-        except Exception as ne:
-            log.warning(f"Daily summary step failed: {ne}")
 
         duration = time.time() - start_time
         store_scrape_log(
@@ -91,7 +87,15 @@ def run_scraper_job():
             message="background scrape success",
             duration_seconds=duration,
             pages_scraped=pages_scraped,
+            notification_stats=notification_stats,
         )
+
+        try:
+            from notifications import send_daily_summary_if_due
+            daily_sent = send_daily_summary_if_due(scrape_ts)  # once/day daily rollup
+            log.info(f"Daily summary attempted: sent={daily_sent}")
+        except Exception as ne:
+            log.warning(f"Daily summary step failed: {ne}")
 
         log.info(f"Scrape done: opened={opened}, updated={updated}, total={len(slots)}, pages={pages_scraped}, dur={duration:.2f}s")
 

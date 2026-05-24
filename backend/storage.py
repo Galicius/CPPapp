@@ -1,21 +1,32 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Optional
 import os
 import sys
+import time
 
 import requests
 
 from storage_helpers import to_int_or_none
 
+SLOTS_CACHE_TTL_SECONDS = int(os.getenv("SLOTS_CACHE_TTL_SECONDS", "60"))
+_slots_cache: dict | None = None
+_slots_cache_until = 0.0
+
 
 def log_stderr(msg: str):
     """Timestamped log to stderr for cloud visibility."""
-    ts = datetime.utcnow().isoformat()
+    ts = datetime.now(UTC).isoformat()
     print(f"[{ts}] [STORAGE] {msg}", file=sys.stderr, flush=True)
 
 
 def _to_int_or_none(val) -> Optional[int]:
     return to_int_or_none(val)
+
+
+def _clear_slots_cache():
+    global _slots_cache, _slots_cache_until
+    _slots_cache = None
+    _slots_cache_until = 0.0
 
 
 def _get_convex_url(action_path: str) -> Optional[str]:
@@ -36,6 +47,21 @@ def _get_convex_headers() -> dict:
     }
 
 
+def _get_app_url() -> Optional[str]:
+    app_url = (
+        os.getenv("APP_BASE_URL")
+        or os.getenv("NEXT_PUBLIC_APP_URL")
+        or os.getenv("VERCEL_PROJECT_PRODUCTION_URL")
+        or os.getenv("VERCEL_URL")
+    )
+    if not app_url:
+        origins = [o.strip() for o in os.getenv("FRONTEND_ORIGINS", "").split(",") if o.strip()]
+        app_url = origins[0] if origins else "https://examalert.vercel.app"
+    if app_url and not app_url.startswith(("http://", "https://")):
+        app_url = f"https://{app_url}"
+    return app_url.rstrip("/") if app_url else None
+
+
 def post_to_convex(action_path: str, payload: dict, timeout: int = 10) -> Optional[dict]:
     url = _get_convex_url(action_path)
     headers = _get_convex_headers()
@@ -54,6 +80,31 @@ def post_to_convex(action_path: str, payload: dict, timeout: int = 10) -> Option
     except Exception as e:
         log_stderr(f"Convex request failed for {action_path}: {e}")
         return None
+
+
+def revalidate_slots_cache() -> bool:
+    app_url = _get_app_url()
+    secret = os.getenv("SCRAPE_SECRET") or os.getenv("SCRAPER_SECRET")
+    if not app_url or not secret:
+        log_stderr("App URL or SCRAPE_SECRET not set; skipping slots cache revalidation")
+        return False
+
+    try:
+        response = requests.post(
+            f"{app_url}/api/cache/slots/revalidate",
+            headers={
+                "Authorization": f"Bearer {secret}",
+                "X-Secret": secret,
+                "Accept": "application/json",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        log_stderr("Revalidated Vercel slots cache")
+        return True
+    except Exception as e:
+        log_stderr(f"Slots cache revalidation failed: {e}")
+        return False
 
 
 def _normalize_dt_fields(it: dict):
@@ -102,6 +153,7 @@ def sync_slots_to_convex(items: list[dict], scrape_ts: datetime) -> dict:
         timeout=20,
     )
     if res:
+        _clear_slots_cache()
         log_stderr("END sync_slots_to_convex success")
         return res
 
@@ -113,19 +165,29 @@ def mark_absent_in_convex(scrape_ts: datetime) -> bool:
     log_stderr("START mark_absent_in_convex")
     res = post_to_convex("markAbsent", {"scrape_ts": scrape_ts.isoformat()})
     if res:
+        _clear_slots_cache()
         log_stderr("END mark_absent_in_convex success")
         return True
     return False
 
 
 def fetch_slots_from_convex() -> dict:
+    global _slots_cache, _slots_cache_until
+
+    now = time.monotonic()
+    if _slots_cache is not None and now < _slots_cache_until:
+        return _slots_cache
+
     res = post_to_convex("slots/available", {})
     if not res or not res.get("ok"):
-        return {"last_scraped_at": None, "items": []}
-    return {
+        return _slots_cache or {"last_scraped_at": None, "items": []}
+
+    _slots_cache = {
         "last_scraped_at": res.get("last_scraped_at"),
         "items": list(res.get("items") or []),
     }
+    _slots_cache_until = now + SLOTS_CACHE_TTL_SECONDS
+    return _slots_cache
 
 
 def store_scrape_log(
@@ -136,9 +198,10 @@ def store_scrape_log(
     message: str = "",
     duration_seconds: float = 0.0,
     pages_scraped: int = 0,
+    notification_stats: Optional[dict] = None,
 ) -> bool:
     """Best-effort write of a scrape summary to Convex."""
-    res = post_to_convex("scrape/log", {
+    payload = {
         "opened": int(opened or 0),
         "updated": int(updated or 0),
         "total": int(total or 0),
@@ -146,5 +209,17 @@ def store_scrape_log(
         "message": message or "",
         "duration_seconds": float(duration_seconds or 0.0),
         "pages_scraped": int(pages_scraped or 0),
-    })
+    }
+    if notification_stats:
+        payload.update({
+            "notification_sent": int(notification_stats.get("sent") or 0),
+            "notification_failed": int(notification_stats.get("failed") or 0),
+            "notification_matching_accounts": int(notification_stats.get("matching_accounts") or 0),
+            "notification_matched_pairs": int(notification_stats.get("matched_pairs") or 0),
+            "notification_matched_slots": int(notification_stats.get("matched_slots") or 0),
+            "notification_out_of_window": int(notification_stats.get("out_of_window") or 0),
+            "notification_city_hits": notification_stats.get("city_hits") or {},
+        })
+
+    res = post_to_convex("scrape/log", payload)
     return bool(res and res.get("ok"))

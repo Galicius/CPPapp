@@ -12,7 +12,7 @@ from notification_policy import (
     slot_within_notification_window,
 )
 import notifications
-from notifications import _render_email, notify_subscribers_for_changes
+from notifications import _aggregate_city_hits, _render_email, notify_subscribers_for_changes, send_daily_summary_if_due
 
 
 class NotificationPolicyTests(unittest.TestCase):
@@ -115,7 +115,7 @@ class NotificationPolicyTests(unittest.TestCase):
         notifications.post_to_convex = fake_post_to_convex
         notifications._resend_send = lambda to, subject, html, text=None: to == "user@example.com"
         try:
-            sent = notify_subscribers_for_changes(
+            stats = notify_subscribers_for_changes(
                 [
                     {
                         "date_str": "09. 04. 2026",
@@ -133,11 +133,97 @@ class NotificationPolicyTests(unittest.TestCase):
             notifications.post_to_convex = original_post_to_convex
             notifications._resend_send = original_resend_send
 
-        self.assertEqual(sent, 1)
+        self.assertEqual(stats["sent"], 1)
+        self.assertEqual(stats["matching_accounts"], 1)
+        self.assertEqual(stats["matched_pairs"], 1)
+        self.assertEqual(stats["matched_slots"], 1)
+        self.assertEqual(stats["city_hits"], {"Ljubljana": 1})
         self.assertIn(
             ("notifications/subscription/notified", {"id": "jx222", "last_notified_at": "2026-03-15T09:00:00"}),
             calls,
         )
+
+    def test_aggregates_top_20_city_hits(self):
+        rows = [
+            {
+                "notification_city_hits": {
+                    f"City {index:02d}": index
+                    for index in range(1, 22)
+                }
+            }
+        ]
+
+        top_cities = _aggregate_city_hits(rows, limit=20)
+
+        self.assertEqual(len(top_cities), 20)
+        self.assertEqual(top_cities[0], ("City 21", 21))
+        self.assertNotIn(("City 01", 1), top_cities)
+
+    def test_daily_summary_includes_notification_and_activity_stats(self):
+        sent_messages = []
+
+        def fake_post_to_convex(action_path, payload):
+            if action_path == "scrape/log/marker":
+                return {"ok": True, "exists": False}
+            if action_path == "scrape/logs/range":
+                return {
+                    "ok": True,
+                    "logs": [
+                        {
+                            "timestamp": "2026-03-15T08:00:00",
+                            "opened": 2,
+                            "updated": 1,
+                            "total": 50,
+                            "success": True,
+                            "notification_sent": 3,
+                            "notification_failed": 1,
+                            "notification_matching_accounts": 4,
+                            "notification_matched_pairs": 7,
+                            "notification_matched_slots": 5,
+                            "notification_out_of_window": 2,
+                            "notification_city_hits": {"Ljubljana": 3, "Maribor": 1},
+                        }
+                    ],
+                }
+            if action_path == "activity/stats/range":
+                return {
+                    "ok": True,
+                    "stats": {
+                        "new_users": 2,
+                        "active_users": 9,
+                        "total_users": 10,
+                        "new_subscriptions": 3,
+                        "active_subscriptions": 8,
+                    },
+                }
+            if action_path == "scrape/log":
+                return {"ok": True}
+            return None
+
+        original_key = notifications.RESEND_API_KEY
+        original_post_to_convex = notifications.post_to_convex
+        original_resend_send = notifications._resend_send
+        original_store_scrape_log = notifications.store_scrape_log
+        notifications.RESEND_API_KEY = "test"
+        notifications.post_to_convex = fake_post_to_convex
+        notifications._resend_send = lambda to, subject, html, text=None: sent_messages.append((subject, text)) or True
+        notifications.store_scrape_log = lambda *args, **kwargs: True
+        try:
+            ok = send_daily_summary_if_due(datetime(2026, 3, 15, 20, 0, 0))
+        finally:
+            notifications.RESEND_API_KEY = original_key
+            notifications.post_to_convex = original_post_to_convex
+            notifications._resend_send = original_resend_send
+            notifications.store_scrape_log = original_store_scrape_log
+
+        self.assertTrue(ok)
+        subject, text = sent_messages[0]
+        self.assertIn("notified 3", subject)
+        self.assertIn("Accounts emailed: 3", text)
+        self.assertIn("Accounts with filter hits: 4", text)
+        self.assertIn("Ljubljana: 3", text)
+        self.assertIn("New users today: 2", text)
+        self.assertIn("Active subscriptions: 8", text)
 
 
 if __name__ == "__main__":

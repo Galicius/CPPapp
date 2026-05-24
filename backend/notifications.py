@@ -18,6 +18,18 @@ FRONTEND_UNSUB_BASE = os.getenv("FRONTEND_UNSUB_BASE", "https://vozniski.si/api/
 NOTIFICATION_WINDOW_DAYS = int(os.getenv("NOTIFICATION_WINDOW_DAYS", "25"))
 
 
+def empty_notification_stats() -> Dict[str, Any]:
+    return {
+        "sent": 0,
+        "failed": 0,
+        "matching_accounts": 0,
+        "matched_pairs": 0,
+        "matched_slots": 0,
+        "out_of_window": 0,
+        "city_hits": {},
+    }
+
+
 def _log(msg: str) -> None:
     print(f"[{datetime.now(UTC).isoformat()}] [NOTIFICATIONS] {msg}", file=sys.stderr, flush=True)
 
@@ -329,6 +341,16 @@ def _fetch_active_subscriptions() -> List[Dict[str, Any]]:
     _log(f"Fetched active subscriptions count={len(subscriptions)}")
     return subscriptions
 
+
+def _slot_city(slot: Dict[str, Any]) -> str:
+    value = str(slot.get("town") or "").strip()
+    if value:
+        return value
+    location = str(slot.get("location") or "").strip()
+    if not location:
+        return "Unknown"
+    return location.split(",")[0].strip() or location
+
 def _parse_slot_date(slot: Dict[str, Any]) -> Optional[datetime]:
     try:
         return datetime.strptime(str(slot.get("date_str") or "").strip(), "%d. %m. %Y")
@@ -373,34 +395,33 @@ def _match(sub: Dict[str, Any], slot: Dict[str, Any]) -> bool:
             return False
     return True
 
-def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: datetime) -> int:
+def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: datetime) -> Dict[str, Any]:
     """
     Group newly available slots by subscription, send one email per subscription,
     and update last_notified_at.
-    Returns number of subscription emails sent.
+    Returns notification stats for logging and daily reporting.
     """
+    stats = empty_notification_stats()
     if not changes:
         _log("No slot changes from sync; skipping subscriber notifications")
-        return 0
+        return stats
 
     subs = _canonical_subscriptions(_fetch_active_subscriptions())
     if not subs:
         _log("No active subscriptions after canonicalization; skipping subscriber notifications")
-        return 0
+        return stats
 
     # Build one deduplicated slot bucket per canonical subscription (one per email).
     by_sub: dict[str, dict[str, Dict[str, Any]]] = {}
-    out_of_window = 0
-    match_count = 0
     for slot in changes:
         if not _slot_within_notification_window(slot, scrape_ts):
-            out_of_window += 1
+            stats["out_of_window"] += 1
             continue
         for sub in subs:
             if not sub.get("active", True):
                 continue
             if _match(sub, slot):
-                match_count += 1
+                stats["matched_pairs"] += 1
                 slot_key = "|".join([
                     str(slot.get("date_str") or ""),
                     str(slot.get("time_str") or ""),
@@ -413,35 +434,42 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
     if not by_sub:
         _log(
             f"No matching subscriptions for changes={len(changes)} "
-            f"canonical_subscriptions={len(subs)} out_of_window={out_of_window}"
+            f"canonical_subscriptions={len(subs)} out_of_window={stats['out_of_window']}"
         )
-        return 0
+        return stats
 
-    sent = 0
-    failed = 0
+    city_hits: Dict[str, int] = {}
     for sub in subs:
         sid = str(sub["id"])
         items = list((by_sub.get(sid) or {}).values())
         if not items:
             continue
+        stats["matching_accounts"] += 1
+        stats["matched_slots"] += len(items)
+        seen_cities = {_slot_city(item) for item in items}
+        for city in seen_cities:
+            city_hits[city] = city_hits.get(city, 0) + 1
         subject, text, html = _render_email(sub, items)
         ok = _resend_send(sub["email"], subject, html, text)
         if ok:
-            sent += 1
+            stats["sent"] += 1
             # best-effort: update last_notified_at
             post_to_convex(
                 "notifications/subscription/notified",
                 {"id": sid, "last_notified_at": scrape_ts.isoformat()},
             )
         else:
-            failed += 1
+            stats["failed"] += 1
+
+    stats["city_hits"] = city_hits
 
     _log(
         f"Subscriber notification result changes={len(changes)} "
-        f"canonical_subscriptions={len(subs)} matched_pairs={match_count} "
-        f"out_of_window={out_of_window} sent={sent} failed={failed}"
+        f"canonical_subscriptions={len(subs)} matched_pairs={stats['matched_pairs']} "
+        f"matching_accounts={stats['matching_accounts']} matched_slots={stats['matched_slots']} "
+        f"out_of_window={stats['out_of_window']} sent={stats['sent']} failed={stats['failed']}"
     )
-    return sent
+    return stats
 
 def send_test_email(scrape_stats: dict, changes: List[Dict[str, Any]]) -> bool:
     """
@@ -480,6 +508,29 @@ def _dt_range_for_local_day(now_utc: datetime, tz: str = "Europe/Ljubljana") -> 
     return day_label, start_utc, end_utc
 
 
+def _sum_int(rows: List[Dict[str, Any]], key: str) -> int:
+    return sum(int(row.get(key) or 0) for row in rows)
+
+
+def _aggregate_city_hits(rows: List[Dict[str, Any]], limit: int = 20) -> List[tuple[str, int]]:
+    totals: Dict[str, int] = {}
+    for row in rows:
+        city_hits = row.get("notification_city_hits") or {}
+        if not isinstance(city_hits, dict):
+            continue
+        for city, count in city_hits.items():
+            label = str(city or "Unknown").strip() or "Unknown"
+            totals[label] = totals.get(label, 0) + int(count or 0)
+    return sorted(totals.items(), key=lambda item: (-item[1], item[0]))[:limit]
+
+
+def _fetch_activity_stats(start_iso_utc: str, end_iso_utc: str) -> Dict[str, Any]:
+    res = post_to_convex("activity/stats/range", {"start": start_iso_utc, "end": end_iso_utc})
+    if not res or not res.get("ok"):
+        return {}
+    return dict(res.get("stats") or {})
+
+
 def send_daily_summary_if_due(now_utc: datetime) -> bool:
     """
     Sends at most one summary email per local day (Europe/Ljubljana).
@@ -510,6 +561,14 @@ def send_daily_summary_if_due(now_utc: datetime) -> bool:
     agg_updated = sum(int(r.get("updated") or 0) for r in rows)
     agg_total = sum(int(r.get("total") or 0) for r in rows)
     n_scrapes = len(rows)
+    notification_sent = _sum_int(rows, "notification_sent")
+    notification_failed = _sum_int(rows, "notification_failed")
+    notification_matching_accounts = _sum_int(rows, "notification_matching_accounts")
+    notification_matched_pairs = _sum_int(rows, "notification_matched_pairs")
+    notification_matched_slots = _sum_int(rows, "notification_matched_slots")
+    notification_out_of_window = _sum_int(rows, "notification_out_of_window")
+    top_city_hits = _aggregate_city_hits(rows, limit=20)
+    activity_stats = _fetch_activity_stats(start_iso_utc, end_iso_utc)
 
     # Build body
     lines = []
@@ -520,17 +579,41 @@ def send_daily_summary_if_due(now_utc: datetime) -> bool:
     lines.append(f"Reappeared total: {agg_updated}")
     lines.append(f"Fetched total (sum over scrapes): {agg_total}")
     lines.append("")
+    lines.append("Notifications:")
+    lines.append(f" - Accounts emailed: {notification_sent}")
+    lines.append(f" - Accounts with filter hits: {notification_matching_accounts}")
+    lines.append(f" - Failed notification sends: {notification_failed}")
+    lines.append(f" - Account-slot matches: {notification_matched_pairs}")
+    lines.append(f" - Unique matched slots across accounts: {notification_matched_slots}")
+    lines.append(f" - New/reappeared slots outside {NOTIFICATION_WINDOW_DAYS}-day window: {notification_out_of_window}")
+    lines.append("")
+    lines.append("Top city filter hits (accounts, top 20):")
+    if top_city_hits:
+        for city, count in top_city_hits:
+            lines.append(f" - {city}: {count}")
+    else:
+        lines.append(" - none")
+    lines.append("")
+    lines.append("Account activity:")
+    lines.append(f" - New users today: {int(activity_stats.get('new_users') or 0)}")
+    lines.append(f" - Total active users: {int(activity_stats.get('active_users') or 0)}")
+    lines.append(f" - Total users: {int(activity_stats.get('total_users') or 0)}")
+    lines.append(f" - New subscriptions today: {int(activity_stats.get('new_subscriptions') or 0)}")
+    lines.append(f" - Active subscriptions: {int(activity_stats.get('active_subscriptions') or 0)}")
+    lines.append("")
     lines.append("Per-scrape timeline (UTC):")
     for r in rows:
         ts = r.get("timestamp")
         ok = "ok" if r.get("success") else "FAIL"
         lines.append(
-            f" - {ts}: opened={int(r.get('opened') or 0)}, reappeared={int(r.get('updated') or 0)}, fetched={int(r.get('total') or 0)} [{ok}]"
+            f" - {ts}: opened={int(r.get('opened') or 0)}, reappeared={int(r.get('updated') or 0)}, "
+            f"fetched={int(r.get('total') or 0)}, notified={int(r.get('notification_sent') or 0)}, "
+            f"filter_hits={int(r.get('notification_matching_accounts') or 0)} [{ok}]"
         )
 
     text = "\n".join(lines)
     html = "<pre>" + text + "</pre>"
-    subject = f"[Daily] Scrape summary {day_label} — {n_scrapes} runs, opened {agg_opened}, reappeared {agg_updated}"
+    subject = (f"[Daily] Scrape summary {day_label} - {n_scrapes} runs, " f"opened {agg_opened}, reappeared {agg_updated}, notified {notification_sent}")
 
     to = "gal.gustin@student.um.si"
     ok = _resend_send(to, subject, html, text)
