@@ -46,6 +46,61 @@ class StorageHelpersTests(unittest.TestCase):
         self.assertEqual(calls[0]["headers"]["X-Secret"], "secret-123")
         self.assertEqual(calls[0]["timeout"], 10)
 
+    def test_mark_absent_sends_seen_slot_keys(self):
+        calls = []
+        original_post_to_convex = storage.post_to_convex
+        storage.post_to_convex = lambda action_path, payload, **kwargs: (
+            calls.append({"action_path": action_path, "payload": payload}),
+            {"ok": True},
+        )[1]
+
+        try:
+            ok = storage.mark_absent_in_convex(
+                storage.datetime(2026, 5, 25, 10, 0, 0),
+                [
+                    {
+                        "date_str": "25. 05. 2026",
+                        "time_str": "08:00",
+                        "obmocje": 2,
+                        "town": "Ljubljana",
+                        "categories": "B",
+                    }
+                ],
+            )
+        finally:
+            storage.post_to_convex = original_post_to_convex
+
+        self.assertTrue(ok)
+        self.assertEqual(calls[0]["action_path"], "markAbsent")
+        self.assertEqual(calls[0]["payload"]["seenKeys"], ['["25. 05. 2026","08:00",2,"Ljubljana","B"]'])
+
+    def test_prime_slots_cache_uses_current_scrape_without_convex_fetch(self):
+        original_post_to_convex = storage.post_to_convex
+        storage.post_to_convex = lambda *args, **kwargs: self.fail("fetch_slots_from_convex should use primed cache")
+
+        try:
+            storage.prime_slots_cache(
+                [
+                    {
+                        "date_str": "25. 05. 2026",
+                        "time_str": "08:00",
+                        "obmocje": 2,
+                        "town": "Ljubljana",
+                        "categories": "B",
+                        "places_left": "3",
+                    }
+                ],
+                storage.datetime(2026, 5, 25, 10, 0, 0),
+            )
+            cached = storage.fetch_slots_from_convex()
+        finally:
+            storage._clear_slots_cache()
+            storage.post_to_convex = original_post_to_convex
+
+        self.assertEqual(cached["last_scraped_at"], "2026-05-25T10:00:00")
+        self.assertEqual(cached["items"][0]["town"], "Ljubljana")
+        self.assertEqual(cached["items"][0]["places_left"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

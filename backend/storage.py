@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from typing import Optional
 import os
+import json
 import sys
 import time
 
@@ -27,6 +28,15 @@ def _clear_slots_cache():
     global _slots_cache, _slots_cache_until
     _slots_cache = None
     _slots_cache_until = 0.0
+
+
+def prime_slots_cache(items: list[dict], scrape_ts: datetime):
+    global _slots_cache, _slots_cache_until
+    _slots_cache = {
+        "last_scraped_at": scrape_ts.isoformat(),
+        "items": _slot_payload(items),
+    }
+    _slots_cache_until = time.monotonic() + SLOTS_CACHE_TTL_SECONDS
 
 
 def _get_convex_url(action_path: str) -> Optional[str]:
@@ -141,6 +151,16 @@ def _slot_payload(items: list[dict]) -> list[dict]:
     return rows
 
 
+def _slot_key(item: dict) -> str:
+    return json.dumps([
+        item.get("date_str"),
+        item.get("time_str"),
+        item.get("obmocje"),
+        item.get("town"),
+        item.get("categories", "") or "",
+    ], separators=(",", ":"))
+
+
 def sync_slots_to_convex(items: list[dict], scrape_ts: datetime) -> dict:
     """Push newly scraped slots to Convex and return Convex change stats."""
     log_stderr(f"START sync_slots_to_convex items={len(items)}")
@@ -160,10 +180,14 @@ def sync_slots_to_convex(items: list[dict], scrape_ts: datetime) -> dict:
     return {"ok": False, "opened": 0, "updated": 0, "changes": []}
 
 
-def mark_absent_in_convex(scrape_ts: datetime) -> bool:
+def mark_absent_in_convex(scrape_ts: datetime, items: Optional[list[dict]] = None) -> bool:
     """Ask Convex to mark slots not seen in this scrape as unavailable."""
     log_stderr("START mark_absent_in_convex")
-    res = post_to_convex("markAbsent", {"scrape_ts": scrape_ts.isoformat()})
+    payload = {"scrape_ts": scrape_ts.isoformat()}
+    if items is not None:
+        payload["seenKeys"] = [_slot_key(item) for item in _slot_payload(items)]
+
+    res = post_to_convex("markAbsent", payload)
     if res:
         _clear_slots_cache()
         log_stderr("END mark_absent_in_convex success")
