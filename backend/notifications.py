@@ -516,9 +516,17 @@ def _aggregate_city_hits(rows: List[Dict[str, Any]], limit: int = 20) -> List[tu
     totals: Dict[str, int] = {}
     for row in rows:
         city_hits = row.get("notification_city_hits") or {}
-        if not isinstance(city_hits, dict):
+        if isinstance(city_hits, list):
+            items = [
+                (entry.get("city"), entry.get("count"))
+                for entry in city_hits
+                if isinstance(entry, dict)
+            ]
+        elif isinstance(city_hits, dict):
+            items = city_hits.items()
+        else:
             continue
-        for city, count in city_hits.items():
+        for city, count in items:
             label = str(city or "Unknown").strip() or "Unknown"
             totals[label] = totals.get(label, 0) + int(count or 0)
     return sorted(totals.items(), key=lambda item: (-item[1], item[0]))[:limit]

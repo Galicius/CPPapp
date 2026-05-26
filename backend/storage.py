@@ -161,6 +161,22 @@ def _slot_key(item: dict) -> str:
     ], separators=(",", ":"))
 
 
+def _city_hits_payload(city_hits: dict | None) -> list[dict]:
+    if not isinstance(city_hits, dict):
+        return []
+    rows = []
+    for city, count in city_hits.items():
+        try:
+            numeric_count = int(count or 0)
+        except (TypeError, ValueError):
+            continue
+        rows.append({
+            "city": str(city or "Unknown").strip() or "Unknown",
+            "count": numeric_count,
+        })
+    return rows
+
+
 def sync_slots_to_convex(items: list[dict], scrape_ts: datetime) -> dict:
     """Push newly scraped slots to Convex and return Convex change stats."""
     log_stderr(f"START sync_slots_to_convex items={len(items)}")
@@ -242,7 +258,7 @@ def store_scrape_log(
             "notification_matched_pairs": int(notification_stats.get("matched_pairs") or 0),
             "notification_matched_slots": int(notification_stats.get("matched_slots") or 0),
             "notification_out_of_window": int(notification_stats.get("out_of_window") or 0),
-            "notification_city_hits": notification_stats.get("city_hits") or {},
+            "notification_city_hits": _city_hits_payload(notification_stats.get("city_hits")),
         })
 
     res = post_to_convex("scrape/log", payload)
