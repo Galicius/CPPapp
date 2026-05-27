@@ -46,6 +46,50 @@ class StorageHelpersTests(unittest.TestCase):
         self.assertEqual(calls[0]["headers"]["X-Secret"], "secret-123")
         self.assertEqual(calls[0]["timeout"], 10)
 
+    def test_publish_slots_blob_posts_snapshot_to_app_endpoint(self):
+        calls = []
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+        original_post = storage.requests.post
+        original_env = dict(os.environ)
+        storage.requests.post = lambda url, json=None, headers=None, timeout=None, **kwargs: (
+            calls.append({"url": url, "json": json, "headers": headers or {}, "timeout": timeout}),
+            FakeResponse(),
+        )[1]
+
+        try:
+            os.environ["APP_BASE_URL"] = "https://vozniski.example"
+            os.environ["SCRAPE_SECRET"] = "secret-123"
+
+            ok = storage.publish_slots_blob(
+                [
+                    {
+                        "date_str": "25. 05. 2026",
+                        "time_str": "08:00",
+                        "obmocje": 2,
+                        "town": "Ljubljana",
+                        "categories": "B",
+                        "places_left": "3",
+                    }
+                ],
+                storage.datetime(2026, 5, 25, 10, 0, 0),
+            )
+        finally:
+            storage.requests.post = original_post
+            os.environ.clear()
+            os.environ.update(original_env)
+
+        self.assertTrue(ok)
+        self.assertEqual(calls[0]["url"], "https://vozniski.example/api/cache/slots/blob")
+        self.assertEqual(calls[0]["headers"]["Authorization"], "Bearer secret-123")
+        self.assertEqual(calls[0]["json"]["count"], 1)
+        self.assertEqual(calls[0]["json"]["last_scraped_at"], "2026-05-25T10:00:00")
+        self.assertEqual(calls[0]["json"]["items"][0]["places_left"], 3)
+        self.assertEqual(calls[0]["timeout"], 20)
+
     def test_mark_absent_sends_seen_slot_keys(self):
         calls = []
         original_post_to_convex = storage.post_to_convex

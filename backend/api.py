@@ -57,7 +57,7 @@ def run_scraper_job():
         from scraper import fetch_all_pages
         from storage import (
             store_scrape_log, sync_slots_to_convex, mark_absent_in_convex,
-            prime_slots_cache, revalidate_slots_cache,
+            prime_slots_cache, publish_slots_blob, revalidate_slots_cache,
         )
 
         slots, pages_scraped = fetch_all_pages()
@@ -68,6 +68,7 @@ def run_scraper_job():
         changes = list(sync_result.get("changes") or [])
         mark_absent_in_convex(scrape_ts, slots)
         prime_slots_cache(slots, scrape_ts)
+        publish_slots_blob(slots, scrape_ts)
         revalidate_slots_cache()
 
         # --- Notifications ---

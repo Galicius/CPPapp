@@ -117,6 +117,38 @@ def revalidate_slots_cache() -> bool:
         return False
 
 
+def publish_slots_blob(items: list[dict], scrape_ts: datetime) -> bool:
+    app_url = _get_app_url()
+    secret = os.getenv("SCRAPE_SECRET") or os.getenv("SCRAPER_SECRET")
+    if not app_url or not secret:
+        log_stderr("App URL or SCRAPE_SECRET not set; skipping slots blob publish")
+        return False
+
+    payload = {
+        "last_scraped_at": scrape_ts.isoformat(),
+        "count": len(items or []),
+        "items": _slot_payload(items or []),
+    }
+
+    try:
+        response = requests.post(
+            f"{app_url}/api/cache/slots/blob",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {secret}",
+                "X-Secret": secret,
+                "Accept": "application/json",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        log_stderr("Published slots snapshot to Vercel Blob")
+        return True
+    except Exception as e:
+        log_stderr(f"Slots blob publish failed: {e}")
+        return False
+
+
 def _normalize_dt_fields(it: dict):
     out = dict(it)
     try:
