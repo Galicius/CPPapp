@@ -72,6 +72,25 @@ def _get_app_url() -> Optional[str]:
     return app_url.rstrip("/") if app_url else None
 
 
+def _http_error_detail(error: Exception) -> str:
+    response = getattr(error, "response", None)
+    if response is None:
+        return ""
+
+    try:
+        body = response.text
+    except Exception:
+        body = ""
+
+    if not body:
+        return ""
+
+    body = body.strip()
+    if len(body) > 1000:
+        body = f"{body[:1000]}..."
+    return f" response_body={body}"
+
+
 def post_to_convex(action_path: str, payload: dict, timeout: int = 10) -> Optional[dict]:
     url = _get_convex_url(action_path)
     headers = _get_convex_headers()
@@ -113,7 +132,7 @@ def revalidate_slots_cache() -> bool:
         log_stderr("Revalidated Vercel slots cache")
         return True
     except Exception as e:
-        log_stderr(f"Slots cache revalidation failed: {e}")
+        log_stderr(f"Slots cache revalidation failed: {e}{_http_error_detail(e)}")
         return False
 
 
@@ -145,7 +164,7 @@ def publish_slots_blob(items: list[dict], scrape_ts: datetime) -> bool:
         log_stderr("Published slots snapshot to Vercel Blob")
         return True
     except Exception as e:
-        log_stderr(f"Slots blob publish failed: {e}")
+        log_stderr(f"Slots blob publish failed: {e}{_http_error_detail(e)}")
         return False
 
 

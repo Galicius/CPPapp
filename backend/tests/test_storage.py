@@ -90,6 +90,38 @@ class StorageHelpersTests(unittest.TestCase):
         self.assertEqual(calls[0]["json"]["items"][0]["places_left"], 3)
         self.assertEqual(calls[0]["timeout"], 20)
 
+    def test_publish_slots_blob_logs_error_response_body(self):
+        logs = []
+
+        class FakeResponse:
+            text = '{"ok":false,"detail":"No blob credentials found"}'
+
+            def raise_for_status(self):
+                error = storage.requests.exceptions.HTTPError("502 Server Error")
+                error.response = self
+                raise error
+
+        original_post = storage.requests.post
+        original_log = storage.log_stderr
+        original_env = dict(os.environ)
+        storage.requests.post = lambda *args, **kwargs: FakeResponse()
+        storage.log_stderr = logs.append
+
+        try:
+            os.environ["APP_BASE_URL"] = "https://vozniski.example"
+            os.environ["SCRAPE_SECRET"] = "secret-123"
+
+            ok = storage.publish_slots_blob([], storage.datetime(2026, 5, 25, 10, 0, 0))
+        finally:
+            storage.requests.post = original_post
+            storage.log_stderr = original_log
+            os.environ.clear()
+            os.environ.update(original_env)
+
+        self.assertFalse(ok)
+        self.assertIn("response_body=", logs[0])
+        self.assertIn("No blob credentials found", logs[0])
+
     def test_mark_absent_sends_seen_slot_keys(self):
         calls = []
         original_post_to_convex = storage.post_to_convex
