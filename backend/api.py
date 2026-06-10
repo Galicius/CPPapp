@@ -82,14 +82,14 @@ def list_slots(
             "location": s.location,
             "categories": s.categories,
         }
-        items.append((d, _parse_time(s.time_str), it))
+        items.append((d, _parse_time(s.time_str), it, s.obmocje))
 
     # Filters
     if cat:
         selected = {x.strip() for x in cat.split(",") if x.strip()}
         items = [t for t in items if selected & set(t[2]["categories"].split(","))]
     if region:
-        items = [t for t in items if t[2]["location"] and f"Območje {region}" in t[2]["location"]]
+        items = [t for t in items if str(t[3]) == str(region)]
 
     # Sort by real date then time
     items.sort(key=lambda x: (x[0], x[1]))
@@ -105,7 +105,7 @@ def slots_all(
     cat: str | None = Query(default=None, description="Comma categories, e.g. B,B1"),
     region: str | None = Query(default=None, description="Contains 'Območje X'"),
     limit: int | None = Query(default=None, description="Optional max items"),
-    include_fields: str | None = Query(default=None, description="Comma list of extra fields: obmocje,town,exam_type,places_left,tolmac,source_page,created_at,updated_at"),
+    include_fields: str | None = Query(default=None, description="Comma list of extra fields: obmocje,town,exam_type,places_left,tolmac,source_page,details_location,created_at,updated_at"),
 ):
     """
     Return ALL stored slots (past + future), plus last scrape timestamp.
@@ -147,17 +147,18 @@ def slots_all(
             if "places_left" in extra: it["places_left"] = s.places_left
             if "tolmac" in extra:      it["tolmac"] = s.tolmac
             if "source_page" in extra: it["source_page"] = s.source_page
+            if "details_location" in extra: it["details_location"] = s.details_location
             if "created_at" in extra:  it["created_at"] = s.created_at.isoformat(timespec="seconds") + "Z"
             if "updated_at" in extra:  it["updated_at"] = s.updated_at.isoformat(timespec="seconds") + "Z"
 
-        items.append((d, _t(s.time_str), it))
+        items.append((d, _t(s.time_str), it, s.obmocje))
 
     # filters
     if cat:
         want = {x.strip() for x in cat.split(",") if x.strip()}
         items = [t for t in items if want & set(t[2]["categories"].split(","))]
     if region:
-        items = [t for t in items if t[2]["location"] and f"Območje {region}" in t[2]["location"]]
+        items = [t for t in items if str(t[3]) == str(region)]
 
     # sort by date then time
     items.sort(key=lambda x: (x[0], x[1]))

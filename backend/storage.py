@@ -2,6 +2,7 @@
 from datetime import datetime
 from typing import Optional
 from sqlmodel import Field, SQLModel, create_engine, Session, select
+from sqlalchemy import inspect, text
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///slots.db")
@@ -25,6 +26,7 @@ class Slot(SQLModel, table=True):
 
     # keep a derived location for backwards compatibility / display
     location: Optional[str] = Field(default=None, index=True)
+    details_location: Optional[str] = Field(default=None)
 
     # flags / timestamps
     available: bool = Field(default=True, index=True)
@@ -33,6 +35,14 @@ class Slot(SQLModel, table=True):
 
 def init_db():
     SQLModel.metadata.create_all(engine)
+    _ensure_slot_columns()
+
+
+def _ensure_slot_columns():
+    columns = {col["name"] for col in inspect(engine).get_columns("slot")}
+    if "details_location" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE slot ADD COLUMN details_location VARCHAR"))
 
 def _make_key(it: dict) -> tuple:
     """
@@ -90,6 +100,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int]:
                     categories=it.get("categories", ""),
                     source_page=it.get("source_page"),
                     location=it.get("location"),
+                    details_location=it.get("details_location"),
                     available=True,
                     created_at=now,
                     updated_at=now,
@@ -104,6 +115,7 @@ def upsert_slots(items: list[dict]) -> tuple[int, int]:
                 row.categories = it.get("categories", row.categories)
                 row.source_page = it.get("source_page", row.source_page)
                 row.location = it.get("location", row.location)
+                row.details_location = it.get("details_location")
                 row.available = True
                 row.updated_at = now
                 updated += 1

@@ -78,6 +78,74 @@ def _compose_location(obmocje: Optional[int], town: Optional[str]) -> Optional[s
     return town
 
 
+def _places_count(value: Optional[int]) -> int:
+    return value if isinstance(value, int) and value > 0 else 1
+
+
+DETAIL_LOCATION_PREFIXES = [
+    "Slovenska Bistrica",
+    "Šmarje pri Jelšah",
+    "Slovenj Gradec",
+    "Murska Sobota",
+    "Nova Gorica",
+    "Ljubečna",
+    "Maribor",
+    "Jesenice",
+    "Postojna",
+    "Šentjur",
+    "Trbovlje",
+    "Velenje",
+    "Ormož",
+    "Tolmin",
+    "Kranj",
+    "Ptuj",
+]
+
+
+def _strip_detail_suffix(s: str, pattern: str) -> tuple[str, bool]:
+    trimmed = re.sub(pattern, "", s, flags=re.IGNORECASE).strip(" ,")
+    return trimmed, trimmed != s.strip(" ,")
+
+
+def _normalize_details_location(raw: str) -> Optional[str]:
+    s = _norm_space(raw)
+    if not s:
+        return None
+
+    s = re.sub(r"^Za izpit [sz]\s+tolmačem\s+", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^teorija\s+", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^\d+\s+(?=\S)", "", s)
+
+    suffixes = []
+    s, found = _strip_detail_suffix(s, r"(?:,\s*)?TESTIRNICA$")
+    if found:
+        suffixes.append("testirnica")
+    s, found = _strip_detail_suffix(s, r"\bCCE\s+KAT$")
+    if found:
+        suffixes.append("CCE kat.")
+    s, found = _strip_detail_suffix(s, r"\bA\s+KAT$")
+    if found:
+        suffixes.append("A kat.")
+
+    folded = s.casefold()
+    for prefix in DETAIL_LOCATION_PREFIXES:
+        prefix_folded = prefix.casefold()
+        if folded == prefix_folded:
+            s = prefix
+            break
+        if folded.startswith(prefix_folded):
+            rest = s[len(prefix):].lstrip(" ,")
+            if rest:
+                s = f"{prefix}, {rest}"
+            else:
+                s = prefix
+            break
+
+    if suffixes:
+        s = f"{s}, {', '.join(suffixes)}"
+    return s
+
+
 def _parse_iso(date_str: str, time_str: str) -> Tuple[Optional[str], Optional[str]]:
     # input like "14. 10. 2025" and "8:30"
     try:
@@ -155,6 +223,7 @@ def _parse_block_node(node) -> Dict:
 
     # details row: full address and exam type
     full_loc = _tx(details_tr.select_one(".dicTitle2")) if details_tr else ""
+    details_location = _normalize_details_location(full_loc)
     location = full_loc or city or None
 
     # town: prefer details (address), fallback to summary city
@@ -206,6 +275,7 @@ def _parse_block_node(node) -> Dict:
         "tolmac": bool(tolmac),
         "categories": cats,
         "location": location,
+        "details_location": details_location,
     }
 
 
@@ -276,7 +346,7 @@ def fetch_all_pages(
         )
 
         all_items: List[Dict] = []
-        seen = set()
+        items_by_key: Dict[tuple, Dict] = {}
         last_len = None
 
         for page in range(max_pages):
@@ -332,9 +402,11 @@ def fetch_all_pages(
                     (info.get("town") or "").strip().lower(),
                     info.get("categories", ""),
                 )
-                if key in seen:
+                existing = items_by_key.get(key)
+                if existing is not None:
+                    existing["places_left"] = _places_count(existing.get("places_left")) + _places_count(info.get("places_left"))
+                    existing["available"] = bool(existing["places_left"] > 0)
                     continue
-                seen.add(key)
 
                 date_iso, time_iso = _parse_iso(info["date_str"], info["time_str"])
                 available = bool((info.get("places_left") or 0) > 0)
@@ -351,11 +423,13 @@ def fetch_all_pages(
                     "tolmac": info["tolmac"],
                     "categories": info.get("categories", ""),
                     "source_page": page,           # <-- match DB shape
-                    "location": _compose_location(info.get("obmocje"), info.get("town")),
+                    "location": info.get("details_location") or _compose_location(info.get("obmocje"), info.get("town")),
+                    "details_location": info.get("details_location"),
                     "available": available,        # <-- match DB shape
                 }
 
                 all_items.append(item)
+                items_by_key[key] = item
                 page_new += 1
 
             if stop_due_to_cutoff:
