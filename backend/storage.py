@@ -309,6 +309,7 @@ def store_scrape_log(
             "notification_matched_pairs": int(notification_stats.get("matched_pairs") or 0),
             "notification_matched_slots": int(notification_stats.get("matched_slots") or 0),
             "notification_out_of_window": int(notification_stats.get("out_of_window") or 0),
+            "notification_already_notified": int(notification_stats.get("already_notified") or 0),
             "notification_city_hits": _city_hits_payload(notification_stats.get("city_hits")),
         })
 

@@ -9,6 +9,7 @@ sys.modules.setdefault("httpx", types.SimpleNamespace(Client=None))
 
 from notification_policy import (
     canonical_subscriptions,
+    slot_within_time_windows,
     slot_within_notification_window,
 )
 import notifications
@@ -59,6 +60,14 @@ class NotificationPolicyTests(unittest.TestCase):
             )
         )
 
+    def test_slot_time_windows_allow_two_parts_of_day(self):
+        windows = '[{"start":"07:00","end":"08:30"},{"start":"14:00","end":"18:00"}]'
+
+        self.assertTrue(slot_within_time_windows({"time_str": "08:00"}, windows))
+        self.assertTrue(slot_within_time_windows({"time_str": "15:30"}, windows))
+        self.assertFalse(slot_within_time_windows({"time_str": "12:00"}, windows))
+        self.assertTrue(slot_within_time_windows({"time_str": "12:00"}, None))
+
     def test_renders_notification_in_subscription_language(self):
         slot = {
             "date_str": "09. 04. 2026",
@@ -102,6 +111,7 @@ class NotificationPolicyTests(unittest.TestCase):
                             "filter_town": "Ljubljana",
                             "filter_exam_type": "voznja",
                             "filter_categories": "B",
+                            "filter_time_windows": '[{"start":"07:00","end":"08:30"},{"start":"14:00","end":"18:00"}]',
                             "unsubscribe_token": "abc",
                         }
                     ],
@@ -142,6 +152,159 @@ class NotificationPolicyTests(unittest.TestCase):
             ("notifications/subscription/notified", {"id": "jx222", "last_notified_at": "2026-03-15T09:00:00"}),
             calls,
         )
+
+    def test_skips_subscription_slots_outside_selected_times(self):
+        sent = []
+
+        def fake_post_to_convex(action_path, payload):
+            if action_path == "notifications/subscriptions":
+                return {
+                    "ok": True,
+                    "subscriptions": [
+                        {
+                            "id": "jx222",
+                            "email": "user@example.com",
+                            "active": True,
+                            "created_at": "2026-03-02T10:00:00",
+                            "filter_town": "Ljubljana",
+                            "filter_exam_type": "voznja",
+                            "filter_categories": "B",
+                            "filter_time_windows": '[{"start":"07:00","end":"08:30"},{"start":"14:00","end":"18:00"}]',
+                        }
+                    ],
+                }
+            return {"ok": True}
+
+        original_post_to_convex = notifications.post_to_convex
+        original_resend_send = notifications._resend_send
+        notifications.post_to_convex = fake_post_to_convex
+        notifications._resend_send = lambda *args, **kwargs: sent.append(args) or True
+        try:
+            stats = notify_subscribers_for_changes(
+                [
+                    {
+                        "date_str": "09. 04. 2026",
+                        "time_str": "12:00",
+                        "location": "Ljubljana",
+                        "town": "Ljubljana",
+                        "categories": "B",
+                        "exam_type": "voznja",
+                        "places_left": 2,
+                    }
+                ],
+                datetime(2026, 3, 15, 9, 0, 0),
+            )
+        finally:
+            notifications.post_to_convex = original_post_to_convex
+            notifications._resend_send = original_resend_send
+
+        self.assertEqual(stats["sent"], 0)
+        self.assertEqual(stats["matched_pairs"], 0)
+        self.assertEqual(sent, [])
+
+    def test_skips_slots_already_notified_to_subscription(self):
+        sent = []
+
+        def fake_post_to_convex(action_path, payload):
+            if action_path == "notifications/subscriptions":
+                return {
+                    "ok": True,
+                    "subscriptions": [
+                        {
+                            "id": "jx222",
+                            "email": "user@example.com",
+                            "active": True,
+                            "created_at": "2026-03-02T10:00:00",
+                            "filter_town": "Domžale",
+                            "filter_categories": "B",
+                        }
+                    ],
+                }
+            if action_path == "notifications/subscription/unnotified-slots":
+                return {"ok": True, "unseenSlotKeys": []}
+            return {"ok": True}
+
+        original_post_to_convex = notifications.post_to_convex
+        original_resend_send = notifications._resend_send
+        notifications.post_to_convex = fake_post_to_convex
+        notifications._resend_send = lambda *args, **kwargs: sent.append(args) or True
+        try:
+            stats = notify_subscribers_for_changes(
+                [
+                    {
+                        "date_str": "09. 04. 2026",
+                        "time_str": "08:00",
+                        "location": "Domžale",
+                        "town": "Domžale",
+                        "obmocje": 2,
+                        "categories": "B",
+                        "exam_type": "voznja",
+                        "places_left": 2,
+                    }
+                ],
+                datetime(2026, 3, 15, 9, 0, 0),
+            )
+        finally:
+            notifications.post_to_convex = original_post_to_convex
+            notifications._resend_send = original_resend_send
+
+        self.assertEqual(stats["sent"], 0)
+        self.assertEqual(stats["already_notified"], 1)
+        self.assertEqual(sent, [])
+
+    def test_backfills_recently_notified_slots_without_resending(self):
+        sent = []
+        calls = []
+
+        def fake_post_to_convex(action_path, payload):
+            calls.append((action_path, payload))
+            if action_path == "notifications/subscriptions":
+                return {
+                    "ok": True,
+                    "subscriptions": [
+                        {
+                            "id": "jx222",
+                            "email": "user@example.com",
+                            "active": True,
+                            "created_at": "2026-03-02T10:00:00",
+                            "last_notified_at": "2026-03-15T08:30:00+00:00",
+                            "filter_town": "Domžale",
+                            "filter_categories": "B",
+                        }
+                    ],
+                }
+            if action_path == "notifications/subscription/unnotified-slots":
+                return {"ok": True, "unseenSlotKeys": payload["slot_keys"]}
+            return {"ok": True}
+
+        original_post_to_convex = notifications.post_to_convex
+        original_resend_send = notifications._resend_send
+        notifications.post_to_convex = fake_post_to_convex
+        notifications._resend_send = lambda *args, **kwargs: sent.append(args) or True
+        try:
+            stats = notify_subscribers_for_changes(
+                [
+                    {
+                        "date_str": "09. 04. 2026",
+                        "time_str": "08:00",
+                        "location": "Domžale",
+                        "town": "Domžale",
+                        "obmocje": 2,
+                        "categories": "B",
+                        "exam_type": "voznja",
+                        "places_left": 2,
+                    }
+                ],
+                datetime(2026, 3, 15, 9, 0, 0),
+            )
+        finally:
+            notifications.post_to_convex = original_post_to_convex
+            notifications._resend_send = original_resend_send
+
+        self.assertEqual(stats["sent"], 0)
+        self.assertEqual(stats["already_notified"], 1)
+        self.assertEqual(sent, [])
+        self.assertTrue(any(call[0] == "notifications/subscription/record-events" for call in calls))
 
     def test_aggregates_top_20_city_hits(self):
         rows = [
@@ -218,12 +381,29 @@ class NotificationPolicyTests(unittest.TestCase):
 
         self.assertTrue(ok)
         subject, text = sent_messages[0]
-        self.assertIn("notified 3", subject)
+        self.assertIn("emails sent 3", subject)
+        self.assertIn("Notification emails sent today: 3", text)
         self.assertIn("Accounts emailed: 3", text)
         self.assertIn("Accounts with filter hits: 4", text)
         self.assertIn("Ljubljana: 3", text)
         self.assertIn("New users today: 2", text)
         self.assertIn("Active subscriptions: 8", text)
+
+    def test_daily_summary_waits_until_evening(self):
+        calls = []
+
+        original_key = notifications.RESEND_API_KEY
+        original_post_to_convex = notifications.post_to_convex
+        notifications.RESEND_API_KEY = "test"
+        notifications.post_to_convex = lambda action_path, payload: calls.append((action_path, payload)) or {"ok": True}
+        try:
+            ok = send_daily_summary_if_due(datetime(2026, 3, 15, 7, 0, 0))
+        finally:
+            notifications.RESEND_API_KEY = original_key
+            notifications.post_to_convex = original_post_to_convex
+
+        self.assertFalse(ok)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

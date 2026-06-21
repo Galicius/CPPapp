@@ -201,5 +201,28 @@ class StorageHelpersTests(unittest.TestCase):
         self.assertEqual(calls[0]["payload"]["notification_city_hits"], [{"city": "Domžale", "count": 2}])
 
 
+    def test_store_scrape_log_sends_already_notified_count(self):
+        calls = []
+        original_post_to_convex = storage.post_to_convex
+        storage.post_to_convex = lambda action_path, payload, **kwargs: (
+            calls.append({"action_path": action_path, "payload": payload}),
+            {"ok": True},
+        )[1]
+
+        try:
+            ok = storage.store_scrape_log(
+                opened=1,
+                updated=0,
+                total=5,
+                success=True,
+                notification_stats={"already_notified": 3},
+            )
+        finally:
+            storage.post_to_convex = original_post_to_convex
+
+        self.assertTrue(ok)
+        self.assertEqual(calls[0]["payload"]["notification_already_notified"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

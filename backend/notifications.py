@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 from html import escape
 import httpx
 from datetime import UTC, datetime
 from typing import List, Dict, Any, Optional, Tuple
-from notification_policy import canonical_subscriptions, slot_within_notification_window
+from notification_policy import canonical_subscriptions, slot_within_notification_window, slot_within_time_windows
 from storage import post_to_convex, store_scrape_log
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,8 @@ RESEND_API_URL = "https://api.resend.com/emails"
 MAIL_FROM = os.getenv("MAIL_FROM", "ExamAlert <obvestila@vozniski.si>")
 FRONTEND_UNSUB_BASE = os.getenv("FRONTEND_UNSUB_BASE", "https://vozniski.si/api/unsubscribe")
 NOTIFICATION_WINDOW_DAYS = int(os.getenv("NOTIFICATION_WINDOW_DAYS", "25"))
+DAILY_SUMMARY_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", "20"))
+BACKFILL_RECENT_NOTIFICATIONS_HOURS = int(os.getenv("BACKFILL_RECENT_NOTIFICATIONS_HOURS", "12"))
 
 
 def empty_notification_stats() -> Dict[str, Any]:
@@ -26,6 +29,7 @@ def empty_notification_stats() -> Dict[str, Any]:
         "matched_pairs": 0,
         "matched_slots": 0,
         "out_of_window": 0,
+        "already_notified": 0,
         "city_hits": {},
     }
 
@@ -351,6 +355,66 @@ def _slot_city(slot: Dict[str, Any]) -> str:
         return "Unknown"
     return location.split(",")[0].strip() or location
 
+def _notification_slot_key(slot: Dict[str, Any]) -> str:
+    return json.dumps([
+        slot.get("date_str"),
+        slot.get("time_str"),
+        slot.get("obmocje"),
+        slot.get("town"),
+        slot.get("categories", "") or "",
+        slot.get("exam_type") or "",
+    ], separators=(",", ":"), ensure_ascii=False)
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    except Exception:
+        return None
+
+def _was_recently_notified(sub: Dict[str, Any], scrape_ts: datetime) -> bool:
+    last_notified_at = _parse_iso_datetime(sub.get("last_notified_at"))
+    if not last_notified_at:
+        return False
+    current = scrape_ts if scrape_ts.tzinfo else scrape_ts.replace(tzinfo=UTC)
+    hours = (current.astimezone(UTC) - last_notified_at).total_seconds() / 3600
+    return 0 <= hours <= BACKFILL_RECENT_NOTIFICATIONS_HOURS
+
+def _filter_unnotified_items(sub: Dict[str, Any], items: List[Dict[str, Any]], scrape_ts: datetime) -> List[Dict[str, Any]]:
+    slot_keys = [_notification_slot_key(item) for item in items]
+    res = post_to_convex(
+        "notifications/subscription/unnotified-slots",
+        {"subscription_id": str(sub["id"]), "slot_keys": slot_keys},
+    )
+    if not res or not res.get("ok"):
+        _log(f"Could not verify notification history subscription_id={sub.get('id')}; sending conservatively")
+        return items
+    unseen = set(res.get("unseenSlotKeys") or [])
+    if len(unseen) == len(set(slot_keys)) and _was_recently_notified(sub, scrape_ts):
+        _record_notification_events(sub, items, _parse_iso_datetime(sub.get("last_notified_at")) or scrape_ts)
+        return []
+    return [item for item in items if _notification_slot_key(item) in unseen]
+
+def _record_notification_events(sub: Dict[str, Any], items: List[Dict[str, Any]], scrape_ts: datetime) -> None:
+    if not items:
+        return
+    post_to_convex(
+        "notifications/subscription/record-events",
+        {
+            "subscription_id": str(sub["id"]),
+            "slot_keys": [_notification_slot_key(item) for item in items],
+            "notified_at": scrape_ts.isoformat(),
+            "email": str(sub.get("email") or "").strip().lower(),
+        },
+    )
+
 def _parse_slot_date(slot: Dict[str, Any]) -> Optional[datetime]:
     try:
         return datetime.strptime(str(slot.get("date_str") or "").strip(), "%d. %m. %Y")
@@ -393,6 +457,8 @@ def _match(sub: Dict[str, Any], slot: Dict[str, Any]) -> bool:
         have = {t.strip().upper() for t in (slot.get("categories") or "").split(",") if t.strip()}
         if want and want not in have:
             return False
+    if not slot_within_time_windows(slot, sub.get("filter_time_windows")):
+        return False
     return True
 
 def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: datetime) -> Dict[str, Any]:
@@ -444,15 +510,20 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
         items = list((by_sub.get(sid) or {}).values())
         if not items:
             continue
+        unnotified_items = _filter_unnotified_items(sub, items, scrape_ts)
+        stats["already_notified"] += len(items) - len(unnotified_items)
+        if not unnotified_items:
+            continue
         stats["matching_accounts"] += 1
-        stats["matched_slots"] += len(items)
-        seen_cities = {_slot_city(item) for item in items}
+        stats["matched_slots"] += len(unnotified_items)
+        seen_cities = {_slot_city(item) for item in unnotified_items}
         for city in seen_cities:
             city_hits[city] = city_hits.get(city, 0) + 1
-        subject, text, html = _render_email(sub, items)
+        subject, text, html = _render_email(sub, unnotified_items)
         ok = _resend_send(sub["email"], subject, html, text)
         if ok:
             stats["sent"] += 1
+            _record_notification_events(sub, unnotified_items, scrape_ts)
             # best-effort: update last_notified_at
             post_to_convex(
                 "notifications/subscription/notified",
@@ -467,7 +538,8 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
         f"Subscriber notification result changes={len(changes)} "
         f"canonical_subscriptions={len(subs)} matched_pairs={stats['matched_pairs']} "
         f"matching_accounts={stats['matching_accounts']} matched_slots={stats['matched_slots']} "
-        f"out_of_window={stats['out_of_window']} sent={stats['sent']} failed={stats['failed']}"
+        f"out_of_window={stats['out_of_window']} already_notified={stats['already_notified']} "
+        f"sent={stats['sent']} failed={stats['failed']}"
     )
     return stats
 
@@ -549,6 +621,11 @@ def send_daily_summary_if_due(now_utc: datetime) -> bool:
     if not RESEND_API_KEY:
         return False
 
+    local_now = now_utc.astimezone(ZoneInfo("Europe/Ljubljana"))
+    if local_now.hour < DAILY_SUMMARY_HOUR:
+        _log(f"Daily summary not due yet local_hour={local_now.hour} threshold={DAILY_SUMMARY_HOUR}")
+        return False
+
     day_label, start_iso_utc, end_iso_utc = _dt_range_for_local_day(now_utc, "Europe/Ljubljana")
     marker_msg = f"daily_summary_sent {day_label}"
 
@@ -588,6 +665,7 @@ def send_daily_summary_if_due(now_utc: datetime) -> bool:
     lines.append(f"Fetched total (sum over scrapes): {agg_total}")
     lines.append("")
     lines.append("Notifications:")
+    lines.append(f" - Notification emails sent today: {notification_sent}")
     lines.append(f" - Accounts emailed: {notification_sent}")
     lines.append(f" - Accounts with filter hits: {notification_matching_accounts}")
     lines.append(f" - Failed notification sends: {notification_failed}")
@@ -621,7 +699,10 @@ def send_daily_summary_if_due(now_utc: datetime) -> bool:
 
     text = "\n".join(lines)
     html = "<pre>" + text + "</pre>"
-    subject = (f"[Daily] Scrape summary {day_label} - {n_scrapes} runs, " f"opened {agg_opened}, reappeared {agg_updated}, notified {notification_sent}")
+    subject = (
+        f"[Daily] Scrape summary {day_label} - {n_scrapes} runs, "
+        f"opened {agg_opened}, reappeared {agg_updated}, emails sent {notification_sent}"
+    )
 
     to = "gal.gustin@student.um.si"
     ok = _resend_send(to, subject, html, text)
