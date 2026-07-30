@@ -9,6 +9,7 @@ sys.modules.setdefault("httpx", types.SimpleNamespace(Client=None))
 
 from notification_policy import (
     canonical_subscriptions,
+    normalize_email_identity,
     slot_within_time_windows,
     slot_within_notification_window,
 )
@@ -39,6 +40,26 @@ class NotificationPolicyTests(unittest.TestCase):
 
         canonical = canonical_subscriptions(subs)
 
+        self.assertEqual(len(canonical), 1)
+        self.assertEqual(canonical[0]["id"], "jx222")
+
+    def test_gmail_aliases_share_one_subscription_identity(self):
+        subs = [
+            {
+                "id": "jx111",
+                "email": "tick.tack1610+gorenjskajesenice@googlemail.com",
+                "created_at": "2026-07-28T16:00:00",
+            },
+            {
+                "id": "jx222",
+                "email": "ticktack1610+gorenjskakranj@gmail.com",
+                "created_at": "2026-07-28T16:01:00",
+            },
+        ]
+
+        canonical = canonical_subscriptions(subs)
+
+        self.assertEqual(normalize_email_identity(subs[0]["email"]), "ticktack1610@gmail.com")
         self.assertEqual(len(canonical), 1)
         self.assertEqual(canonical[0]["id"], "jx222")
 

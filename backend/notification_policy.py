@@ -79,10 +79,21 @@ def subscription_order_key(sub: Dict[str, Any]) -> tuple[str, str]:
     return (str(sub.get("created_at") or ""), str(sub.get("id") or ""))
 
 
+def normalize_email_identity(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if "@" not in normalized:
+        return normalized
+    local_part, domain = normalized.rsplit("@", 1)
+    if domain in {"gmail.com", "googlemail.com"}:
+        local_part = local_part.split("+", 1)[0].replace(".", "")
+        domain = "gmail.com"
+    return f"{local_part}@{domain}"
+
+
 def canonical_subscriptions(subs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     latest_by_email: Dict[str, Dict[str, Any]] = {}
     for sub in subs:
-        email = str(sub.get("email") or "").strip().lower()
+        email = normalize_email_identity(sub.get("email"))
         if not email:
             continue
         candidate_key = subscription_order_key(sub)
