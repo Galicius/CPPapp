@@ -111,9 +111,13 @@ class NotificationPolicyTests(unittest.TestCase):
         self.assertIn("New exam slots", en_subject)
         self.assertIn("Hello", en_text)
         self.assertIn('lang="en"', en_html)
+        self.assertIn("Help keep the site free", en_html)
+        self.assertIn("gal.gustin@gmail.com", en_text)
         self.assertIn("Novi termini", sl_subject)
         self.assertIn("Pozdravljeni", sl_text)
         self.assertIn('lang="sl"', sl_html)
+        self.assertIn("Pomagaj ohraniti stran brezplačno", sl_html)
+        self.assertIn("https://vozniski.si/flik-logo.svg", sl_html)
 
     def test_notifies_subscription_with_convex_string_id(self):
         calls = []

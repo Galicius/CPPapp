@@ -19,6 +19,8 @@ FRONTEND_UNSUB_BASE = os.getenv("FRONTEND_UNSUB_BASE", "https://vozniski.si/api/
 NOTIFICATION_WINDOW_DAYS = int(os.getenv("NOTIFICATION_WINDOW_DAYS", "25"))
 DAILY_SUMMARY_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", "20"))
 BACKFILL_RECENT_NOTIFICATIONS_HOURS = int(os.getenv("BACKFILL_RECENT_NOTIFICATIONS_HOURS", "12"))
+DONATION_EMAIL = os.getenv("DONATION_EMAIL", "gal.gustin@gmail.com")
+FLIK_LOGO_URL = os.getenv("FLIK_LOGO_URL", "https://vozniski.si/flik-logo.svg")
 
 
 def empty_notification_stats() -> Dict[str, Any]:
@@ -96,6 +98,12 @@ EMAIL_COPY = {
         "footer": "To sporocilo ste prejeli, ker ste naroceni na obvestila na Vozniski.si.",
         "unsubscribe": "Odjava od obvestil",
         "unsubscribe_text": "Odjava",
+        "donation_eyebrow": "Podpri Vozniski.si s Flikom",
+        "donation_title": "Pomagaj ohraniti stran brezplačno",
+        "donation_message": "Od uporabnikov ne ustvarjam dobička. Razvoj in redne mesečne stroške delovanja strani plačujem iz lastnega žepa. Če ti stran pomaga, mi lahko pomagaš s poljubnim zneskom.",
+        "donation_instructions": "V aplikaciji svoje banke izberi Flik in kot prejemnika vnesi:",
+        "donation_finish": "Nato izberi poljuben znesek in potrdi nakazilo.",
+        "donation_thanks": "Hvala, ker podpiraš projekt.",
         "html_lang": "sl",
     },
     "en": {
@@ -117,6 +125,12 @@ EMAIL_COPY = {
         "footer": "You received this message because you subscribed to notifications on Vozniski.si.",
         "unsubscribe": "Unsubscribe from notifications",
         "unsubscribe_text": "Unsubscribe",
+        "donation_eyebrow": "Support Vozniski.si with Flik",
+        "donation_title": "Help keep the site free",
+        "donation_message": "I do not make a profit from users. I pay for development and the site's recurring monthly running costs out of my own pocket. If the site helps you, you can support it with any amount.",
+        "donation_instructions": "In your bank's mobile app, choose Flik and enter this recipient:",
+        "donation_finish": "Then choose any amount and confirm the transfer.",
+        "donation_thanks": "Thank you for supporting the project.",
         "html_lang": "en",
     },
 }
@@ -186,6 +200,45 @@ def _render_slots_html(items: List[Dict[str, Any]], lang: str = "sl") -> str:
         rows.append(row)
     return "\n".join(rows)
 
+def _render_donation_html(lang: str = "sl") -> str:
+    c = EMAIL_COPY[_lang(lang)]
+    logo_url = escape(FLIK_LOGO_URL, quote=True)
+    donation_email = escape(DONATION_EMAIL)
+    return f"""
+        <tr>
+            <td style="padding: 8px 0 24px 0;">
+                <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: {BG_CARD}; border-radius: 8px; border: 1px solid {BORDER};">
+                    <tr>
+                        <td style="padding: 20px;">
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                                <tr>
+                                    <td width="56" valign="middle" style="width: 56px; padding-right: 12px;">
+                                        <img src="{logo_url}" width="44" height="44" alt="Flik" style="display: block; width: 44px; height: 44px; border: 0;" />
+                                    </td>
+                                    <td valign="middle">
+                                        <p style="margin: 0 0 4px 0; font-size: 11px; line-height: 1.4; font-weight: bold; color: #f58b8e; text-transform: uppercase; letter-spacing: 0.8px;">{c['donation_eyebrow']}</p>
+                                        <h3 style="margin: 0; font-size: 18px; line-height: 1.3; font-weight: bold; color: {TEXT_WHITE};">{c['donation_title']}</h3>
+                                    </td>
+                                </tr>
+                            </table>
+                            <p style="margin: 16px 0 0 0; font-size: 14px; line-height: 1.65; color: #cbd5e1;">{c['donation_message']}</p>
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-top: 16px; background-color: {BG_DARK}; border-radius: 6px; border: 1px solid #475569;">
+                                <tr>
+                                    <td style="padding: 12px 16px;">
+                                        <p style="margin: 0; font-size: 12px; line-height: 1.6; color: {TEXT_GRAY};">{c['donation_instructions']}</p>
+                                        <p style="margin: 3px 0 0 0; font-size: 14px; line-height: 1.5; font-weight: bold; color: {TEXT_WHITE}; word-break: break-all;">{donation_email}</p>
+                                        <p style="margin: 3px 0 0 0; font-size: 12px; line-height: 1.6; color: {TEXT_GRAY};">{c['donation_finish']}</p>
+                                    </td>
+                                </tr>
+                            </table>
+                            <p style="margin: 16px 0 0 0; text-align: center; font-size: 12px; font-weight: 500; color: {TEXT_GRAY};">{c['donation_thanks']}</p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    """
+
 def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str, str, str]:
     lang = _lang(sub.get("language"))
     c = EMAIL_COPY[lang]
@@ -198,6 +251,13 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
     for it in items:
         text_lines.append(f" - {_slot_text_line(it, lang)}")
     text_lines.append("")
+    text_lines.extend([
+        c["donation_title"],
+        c["donation_message"],
+        f"{c['donation_instructions']} {DONATION_EMAIL}",
+        c["donation_finish"],
+        "",
+    ])
     unsub_token = sub.get("unsubscribe_token")
     if unsub_token:
         text_lines.append(f"{c['unsubscribe_text']}: {FRONTEND_UNSUB_BASE}?token={unsub_token}")
@@ -205,6 +265,7 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
     text = "\n".join(text_lines)
 
     slots_html = _render_slots_html(items, lang)
+    donation_html = _render_donation_html(lang)
     intro = c["intro"].format(n=n, text_white=TEXT_WHITE)
     unsubscribe_html = (
         f'<p style="font-size: 12px; margin: 0;"><a href="{FRONTEND_UNSUB_BASE}?token={unsub_token}" style="color: {TEXT_GRAY}; text-decoration: underline;">{c["unsubscribe"]}</a></p>'
@@ -240,6 +301,7 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
                             </td>
                         </tr>
                         {slots_html}
+                        {donation_html}
                         <tr>
                             <td style="border-top: 1px solid {BORDER}; padding-top: 20px; text-align: center;">
                                 <p style="font-size: 12px; color: {TEXT_GRAY}; margin: 0 0 10px 0;">{c['footer']}</p>
