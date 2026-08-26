@@ -51,7 +51,7 @@ def trigger(
     background_tasks.add_task(run_scraper_job)
     return {"status": "accepted"}
 
-def run_scraper_job():
+def run_scraper_job(raise_on_error: bool = False):
     start_time = time.time()
     try:
         from scraper import fetch_all_pages
@@ -107,6 +107,8 @@ def run_scraper_job():
             store_scrape_log(0, 0, 0, success=False, message=str(e))
         except Exception:
             pass
+        if raise_on_error:
+            raise
 
 
 @app.get("/healthz")
@@ -143,8 +145,6 @@ def slots_all(
     if cat:
         want = {x.strip() for x in cat.split(",") if x.strip()}
         items = [t for t in items if want & set(t[2]["categories"].split(","))]
-    if region:
-        items = [t for t in items if t[2]["location"] and f"Območje {region}" in t[2]["location"]]
 
     items.sort(key=lambda x: (x[0], x[1]))
     out = [t[2] for t in items]

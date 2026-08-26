@@ -1,0 +1,11 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.job
+      - -t
+      - europe-west1-docker.pkg.dev/$PROJECT_ID/vozniski/scraper-job:latest
+      - .
+images:
+  - europe-west1-docker.pkg.dev/$PROJECT_ID/vozniski/scraper-job:latest

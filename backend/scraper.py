@@ -75,6 +75,10 @@ def _parse_iso(date_str: str, time_str: str) -> Tuple[Optional[str], Optional[st
         return (None, None)
 
 
+def _places_count(value: Optional[int]) -> int:
+    return value if isinstance(value, int) and value > 0 else 1
+
+
 # -------------------- Town extraction --------------------
 
 def _clean_town(raw: str) -> Optional[str]:
@@ -98,6 +102,86 @@ def _clean_town(raw: str) -> Optional[str]:
             if city.lower() in low:
                 return city
     return None
+
+
+DETAIL_LOCATION_PREFIXES = [
+    "Ajdovščina",
+    "Ilirska Bistrica",
+    "Slovenska Bistrica",
+    "Slovenske Konjice",
+    "Ločica ob Savinji",
+    "Ravne na Koroškem",
+    "Šmarje pri Jelšah",
+    "Slovenj Gradec",
+    "Murska Sobota",
+    "Nova Gorica",
+    "Novo mesto",
+    "Domžale",
+    "Brežice",
+    "Črnomelj",
+    "Kočevje",
+    "Ljubečna",
+    "Maribor",
+    "Jesenice",
+    "Postojna",
+    "Šentjur",
+    "Trbovlje",
+    "Velenje",
+    "Idrija",
+    "Sežana",
+    "Koper",
+    "Krško",
+    "Sevnica",
+    "Ormož",
+    "Tolmin",
+    "Laško",
+    "Ljubljana",
+    "Vrhnika",
+    "Kranj",
+    "Ptuj",
+    "Ig",
+]
+
+
+def _strip_detail_suffix(s: str, pattern: str) -> tuple[str, bool]:
+    trimmed = re.sub(pattern, "", s, flags=re.IGNORECASE).strip(" ,")
+    return trimmed, trimmed != s.strip(" ,")
+
+
+def _normalize_details_location(raw: str) -> Optional[str]:
+    s = _norm_space(raw)
+    if not s:
+        return None
+
+    s = re.sub(r"^Za izpit [sz]\s+tolmačem\s+", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^teorija\s+", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^\d+\s+(?=\S)", "", s)
+
+    suffixes = []
+    s, found = _strip_detail_suffix(s, r"(?:,\s*)?TESTIRNICA$")
+    if found:
+        suffixes.append("testirnica")
+    s, found = _strip_detail_suffix(s, r"\bCCE\s+KAT$")
+    if found:
+        suffixes.append("CCE kat.")
+    s, found = _strip_detail_suffix(s, r"\bA\s+KAT$")
+    if found:
+        suffixes.append("A kat.")
+
+    folded = s.casefold()
+    for prefix in DETAIL_LOCATION_PREFIXES:
+        prefix_folded = prefix.casefold()
+        if folded == prefix_folded:
+            s = prefix
+            break
+        if folded.startswith(prefix_folded):
+            rest = s[len(prefix):].lstrip(" ,")
+            s = f"{prefix}, {rest}" if rest else prefix
+            break
+
+    if suffixes:
+        s = f"{s}, {', '.join(suffixes)}"
+    return s
 
 
 def _extract_items_linear(html: str) -> List[Dict]:
@@ -183,7 +267,7 @@ def _parse_block_node_linear(summary_tr, details_tr, date_str) -> Optional[Dict]
 
     # details row: full address and exam type
     full_loc = _tx(details_tr.select_one(".dicTitle2")) if details_tr else ""
-    location = full_loc or city or None
+    location = _normalize_details_location(full_loc) or city or None
 
     # town: prefer details (address), fallback to summary city
     town = _clean_town(full_loc) or _clean_town(city) or None
@@ -324,7 +408,7 @@ def fetch_all_pages(
             )
 
             all_items: List[Dict] = []
-            seen = set()
+            items_by_key: Dict[tuple, Dict] = {}
             last_len = None
 
             for page in range(0, max_pages):
@@ -412,15 +496,18 @@ def fetch_all_pages(
                         (info.get("town") or "").strip().lower(),
                         info.get("categories", ""),
                     )
-                    if key in seen:
+                    existing = items_by_key.get(key)
+                    if existing is not None:
+                        existing["places_left"] = _places_count(existing.get("places_left")) + _places_count(info.get("places_left"))
+                        existing["available"] = bool(existing["places_left"] > 0)
                         continue
-                    seen.add(key)
 
                     # enrich and map to the DB shape you posted
                     item = dict(info)  # includes date_iso, time_iso, available, location
                     item["source_page"] = page
 
                     all_items.append(item)
+                    items_by_key[key] = item
                     page_new += 1
 
                 log(f"Page {page}: found {len(stats_items)} blocks, {page_new} new items.")

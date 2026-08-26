@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 from html import escape
 import httpx
 from datetime import UTC, datetime
 from typing import List, Dict, Any, Optional, Tuple
-from notification_policy import canonical_subscriptions, slot_within_notification_window
+from notification_policy import canonical_subscriptions, slot_within_notification_window, slot_within_time_windows
 from storage import post_to_convex, store_scrape_log
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,10 @@ RESEND_API_URL = "https://api.resend.com/emails"
 MAIL_FROM = os.getenv("MAIL_FROM", "ExamAlert <obvestila@vozniski.si>")
 FRONTEND_UNSUB_BASE = os.getenv("FRONTEND_UNSUB_BASE", "https://vozniski.si/api/unsubscribe")
 NOTIFICATION_WINDOW_DAYS = int(os.getenv("NOTIFICATION_WINDOW_DAYS", "25"))
+DAILY_SUMMARY_HOUR = int(os.getenv("DAILY_SUMMARY_HOUR", "20"))
+BACKFILL_RECENT_NOTIFICATIONS_HOURS = int(os.getenv("BACKFILL_RECENT_NOTIFICATIONS_HOURS", "12"))
+DONATION_EMAIL = os.getenv("DONATION_EMAIL", "gal.gustin@gmail.com")
+FLIK_LOGO_URL = os.getenv("FLIK_LOGO_URL", "https://vozniski.si/flik-logo.svg")
 
 
 def empty_notification_stats() -> Dict[str, Any]:
@@ -26,6 +31,7 @@ def empty_notification_stats() -> Dict[str, Any]:
         "matched_pairs": 0,
         "matched_slots": 0,
         "out_of_window": 0,
+        "already_notified": 0,
         "city_hits": {},
     }
 
@@ -92,6 +98,12 @@ EMAIL_COPY = {
         "footer": "To sporocilo ste prejeli, ker ste naroceni na obvestila na Vozniski.si.",
         "unsubscribe": "Odjava od obvestil",
         "unsubscribe_text": "Odjava",
+        "donation_eyebrow": "Podpri Vozniski.si s Flikom",
+        "donation_title": "Pomagaj ohraniti stran brezplačno",
+        "donation_message": "Od uporabnikov ne ustvarjam dobička. Razvoj in redne mesečne stroške delovanja strani plačujem iz lastnega žepa. Če ti stran pomaga, mi lahko pomagaš s poljubnim zneskom.",
+        "donation_instructions": "V aplikaciji svoje banke izberi Flik in kot prejemnika vnesi:",
+        "donation_finish": "Nato izberi poljuben znesek in potrdi nakazilo.",
+        "donation_thanks": "Hvala, ker podpiraš projekt.",
         "html_lang": "sl",
     },
     "en": {
@@ -113,6 +125,12 @@ EMAIL_COPY = {
         "footer": "You received this message because you subscribed to notifications on Vozniski.si.",
         "unsubscribe": "Unsubscribe from notifications",
         "unsubscribe_text": "Unsubscribe",
+        "donation_eyebrow": "Support Vozniski.si with Flik",
+        "donation_title": "Help keep the site free",
+        "donation_message": "I do not make a profit from users. I pay for development and the site's recurring monthly running costs out of my own pocket. If the site helps you, you can support it with any amount.",
+        "donation_instructions": "In your bank's mobile app, choose Flik and enter this recipient:",
+        "donation_finish": "Then choose any amount and confirm the transfer.",
+        "donation_thanks": "Thank you for supporting the project.",
         "html_lang": "en",
     },
 }
@@ -182,6 +200,45 @@ def _render_slots_html(items: List[Dict[str, Any]], lang: str = "sl") -> str:
         rows.append(row)
     return "\n".join(rows)
 
+def _render_donation_html(lang: str = "sl") -> str:
+    c = EMAIL_COPY[_lang(lang)]
+    logo_url = escape(FLIK_LOGO_URL, quote=True)
+    donation_email = escape(DONATION_EMAIL)
+    return f"""
+        <tr>
+            <td style="padding: 8px 0 24px 0;">
+                <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: {BG_CARD}; border-radius: 8px; border: 1px solid {BORDER};">
+                    <tr>
+                        <td style="padding: 20px;">
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                                <tr>
+                                    <td width="56" valign="middle" style="width: 56px; padding-right: 12px;">
+                                        <img src="{logo_url}" width="44" height="44" alt="Flik" style="display: block; width: 44px; height: 44px; border: 0;" />
+                                    </td>
+                                    <td valign="middle">
+                                        <p style="margin: 0 0 4px 0; font-size: 11px; line-height: 1.4; font-weight: bold; color: #f58b8e; text-transform: uppercase; letter-spacing: 0.8px;">{c['donation_eyebrow']}</p>
+                                        <h3 style="margin: 0; font-size: 18px; line-height: 1.3; font-weight: bold; color: {TEXT_WHITE};">{c['donation_title']}</h3>
+                                    </td>
+                                </tr>
+                            </table>
+                            <p style="margin: 16px 0 0 0; font-size: 14px; line-height: 1.65; color: #cbd5e1;">{c['donation_message']}</p>
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-top: 16px; background-color: {BG_DARK}; border-radius: 6px; border: 1px solid #475569;">
+                                <tr>
+                                    <td style="padding: 12px 16px;">
+                                        <p style="margin: 0; font-size: 12px; line-height: 1.6; color: {TEXT_GRAY};">{c['donation_instructions']}</p>
+                                        <p style="margin: 3px 0 0 0; font-size: 14px; line-height: 1.5; font-weight: bold; color: {TEXT_WHITE}; word-break: break-all;">{donation_email}</p>
+                                        <p style="margin: 3px 0 0 0; font-size: 12px; line-height: 1.6; color: {TEXT_GRAY};">{c['donation_finish']}</p>
+                                    </td>
+                                </tr>
+                            </table>
+                            <p style="margin: 16px 0 0 0; text-align: center; font-size: 12px; font-weight: 500; color: {TEXT_GRAY};">{c['donation_thanks']}</p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    """
+
 def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str, str, str]:
     lang = _lang(sub.get("language"))
     c = EMAIL_COPY[lang]
@@ -194,6 +251,13 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
     for it in items:
         text_lines.append(f" - {_slot_text_line(it, lang)}")
     text_lines.append("")
+    text_lines.extend([
+        c["donation_title"],
+        c["donation_message"],
+        f"{c['donation_instructions']} {DONATION_EMAIL}",
+        c["donation_finish"],
+        "",
+    ])
     unsub_token = sub.get("unsubscribe_token")
     if unsub_token:
         text_lines.append(f"{c['unsubscribe_text']}: {FRONTEND_UNSUB_BASE}?token={unsub_token}")
@@ -201,6 +265,7 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
     text = "\n".join(text_lines)
 
     slots_html = _render_slots_html(items, lang)
+    donation_html = _render_donation_html(lang)
     intro = c["intro"].format(n=n, text_white=TEXT_WHITE)
     unsubscribe_html = (
         f'<p style="font-size: 12px; margin: 0;"><a href="{FRONTEND_UNSUB_BASE}?token={unsub_token}" style="color: {TEXT_GRAY}; text-decoration: underline;">{c["unsubscribe"]}</a></p>'
@@ -236,6 +301,7 @@ def _render_email(sub: Dict[str, Any], items: List[Dict[str, Any]]) -> Tuple[str
                             </td>
                         </tr>
                         {slots_html}
+                        {donation_html}
                         <tr>
                             <td style="border-top: 1px solid {BORDER}; padding-top: 20px; text-align: center;">
                                 <p style="font-size: 12px; color: {TEXT_GRAY}; margin: 0 0 10px 0;">{c['footer']}</p>
@@ -351,6 +417,66 @@ def _slot_city(slot: Dict[str, Any]) -> str:
         return "Unknown"
     return location.split(",")[0].strip() or location
 
+def _notification_slot_key(slot: Dict[str, Any]) -> str:
+    return json.dumps([
+        slot.get("date_str"),
+        slot.get("time_str"),
+        slot.get("obmocje"),
+        slot.get("town"),
+        slot.get("categories", "") or "",
+        slot.get("exam_type") or "",
+    ], separators=(",", ":"), ensure_ascii=False)
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    except Exception:
+        return None
+
+def _was_recently_notified(sub: Dict[str, Any], scrape_ts: datetime) -> bool:
+    last_notified_at = _parse_iso_datetime(sub.get("last_notified_at"))
+    if not last_notified_at:
+        return False
+    current = scrape_ts if scrape_ts.tzinfo else scrape_ts.replace(tzinfo=UTC)
+    hours = (current.astimezone(UTC) - last_notified_at).total_seconds() / 3600
+    return 0 <= hours <= BACKFILL_RECENT_NOTIFICATIONS_HOURS
+
+def _filter_unnotified_items(sub: Dict[str, Any], items: List[Dict[str, Any]], scrape_ts: datetime) -> List[Dict[str, Any]]:
+    slot_keys = [_notification_slot_key(item) for item in items]
+    res = post_to_convex(
+        "notifications/subscription/unnotified-slots",
+        {"subscription_id": str(sub["id"]), "slot_keys": slot_keys},
+    )
+    if not res or not res.get("ok"):
+        _log(f"Could not verify notification history subscription_id={sub.get('id')}; sending conservatively")
+        return items
+    unseen = set(res.get("unseenSlotKeys") or [])
+    if len(unseen) == len(set(slot_keys)) and _was_recently_notified(sub, scrape_ts):
+        _record_notification_events(sub, items, _parse_iso_datetime(sub.get("last_notified_at")) or scrape_ts)
+        return []
+    return [item for item in items if _notification_slot_key(item) in unseen]
+
+def _record_notification_events(sub: Dict[str, Any], items: List[Dict[str, Any]], scrape_ts: datetime) -> None:
+    if not items:
+        return
+    post_to_convex(
+        "notifications/subscription/record-events",
+        {
+            "subscription_id": str(sub["id"]),
+            "slot_keys": [_notification_slot_key(item) for item in items],
+            "notified_at": scrape_ts.isoformat(),
+            "email": str(sub.get("email") or "").strip().lower(),
+        },
+    )
+
 def _parse_slot_date(slot: Dict[str, Any]) -> Optional[datetime]:
     try:
         return datetime.strptime(str(slot.get("date_str") or "").strip(), "%d. %m. %Y")
@@ -393,6 +519,8 @@ def _match(sub: Dict[str, Any], slot: Dict[str, Any]) -> bool:
         have = {t.strip().upper() for t in (slot.get("categories") or "").split(",") if t.strip()}
         if want and want not in have:
             return False
+    if not slot_within_time_windows(slot, sub.get("filter_time_windows")):
+        return False
     return True
 
 def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: datetime) -> Dict[str, Any]:
@@ -444,15 +572,20 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
         items = list((by_sub.get(sid) or {}).values())
         if not items:
             continue
+        unnotified_items = _filter_unnotified_items(sub, items, scrape_ts)
+        stats["already_notified"] += len(items) - len(unnotified_items)
+        if not unnotified_items:
+            continue
         stats["matching_accounts"] += 1
-        stats["matched_slots"] += len(items)
-        seen_cities = {_slot_city(item) for item in items}
+        stats["matched_slots"] += len(unnotified_items)
+        seen_cities = {_slot_city(item) for item in unnotified_items}
         for city in seen_cities:
             city_hits[city] = city_hits.get(city, 0) + 1
-        subject, text, html = _render_email(sub, items)
+        subject, text, html = _render_email(sub, unnotified_items)
         ok = _resend_send(sub["email"], subject, html, text)
         if ok:
             stats["sent"] += 1
+            _record_notification_events(sub, unnotified_items, scrape_ts)
             # best-effort: update last_notified_at
             post_to_convex(
                 "notifications/subscription/notified",
@@ -467,7 +600,8 @@ def notify_subscribers_for_changes(changes: List[Dict[str, Any]], scrape_ts: dat
         f"Subscriber notification result changes={len(changes)} "
         f"canonical_subscriptions={len(subs)} matched_pairs={stats['matched_pairs']} "
         f"matching_accounts={stats['matching_accounts']} matched_slots={stats['matched_slots']} "
-        f"out_of_window={stats['out_of_window']} sent={stats['sent']} failed={stats['failed']}"
+        f"out_of_window={stats['out_of_window']} already_notified={stats['already_notified']} "
+        f"sent={stats['sent']} failed={stats['failed']}"
     )
     return stats
 
@@ -549,6 +683,11 @@ def send_daily_summary_if_due(now_utc: datetime) -> bool:
     if not RESEND_API_KEY:
         return False
 
+    local_now = now_utc.astimezone(ZoneInfo("Europe/Ljubljana"))
+    if local_now.hour < DAILY_SUMMARY_HOUR:
+        _log(f"Daily summary not due yet local_hour={local_now.hour} threshold={DAILY_SUMMARY_HOUR}")
+        return False
+
     day_label, start_iso_utc, end_iso_utc = _dt_range_for_local_day(now_utc, "Europe/Ljubljana")
     marker_msg = f"daily_summary_sent {day_label}"
 
@@ -588,6 +727,7 @@ def send_daily_summary_if_due(now_utc: datetime) -> bool:
     lines.append(f"Fetched total (sum over scrapes): {agg_total}")
     lines.append("")
     lines.append("Notifications:")
+    lines.append(f" - Notification emails sent today: {notification_sent}")
     lines.append(f" - Accounts emailed: {notification_sent}")
     lines.append(f" - Accounts with filter hits: {notification_matching_accounts}")
     lines.append(f" - Failed notification sends: {notification_failed}")
@@ -621,7 +761,10 @@ def send_daily_summary_if_due(now_utc: datetime) -> bool:
 
     text = "\n".join(lines)
     html = "<pre>" + text + "</pre>"
-    subject = (f"[Daily] Scrape summary {day_label} - {n_scrapes} runs, " f"opened {agg_opened}, reappeared {agg_updated}, notified {notification_sent}")
+    subject = (
+        f"[Daily] Scrape summary {day_label} - {n_scrapes} runs, "
+        f"opened {agg_opened}, reappeared {agg_updated}, emails sent {notification_sent}"
+    )
 
     to = "gal.gustin@student.um.si"
     ok = _resend_send(to, subject, html, text)
